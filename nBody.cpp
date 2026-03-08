@@ -3,6 +3,7 @@
 #include <cmath>
 
 const double G = 6.67430e-11;
+const double dt = 3600; //time per loop in seconds
 
 struct Vec3 {
     double x, y, z;
@@ -30,11 +31,15 @@ struct Body {
     double mass;
 };
 
-double calcG(Body b1, Body b2){
+void calcAcc(Body& b1, Body& b2){
     double r = (b1.pos - b2.pos).magnitude(); //distance between the two bodies
     double m1 = b1.mass;
     double m2 = b2.mass;
-    return (G * m1 * m2)/(r*r); //gravitational force between bodies, using (Gm1m2/(r^2))
+    double forceMag = (G * m1 * m2)/(r*r); //gravitational force magnitude between bodies, using (Gm1m2/(r^2))
+    Vec3 dir = (b1.pos - b2.pos).uVec(); //vector pointing from body 1 to body 2
+    Vec3 forceVec = dir * forceMag; //multiplying direction vector from one planet to the other by the magnitude of the force to make it a vector
+    b1.acc = b1.acc + forceVec * (1.0/b1.mass); //Acceleration is F/m as F=ma. Also we multiply by 1/mass because I didn't write a / operator.
+    b2.acc = b2.acc - forceVec * (1.0/b2.mass); //The force vector for b2 is flipped due to Newton's third law
 }
 
 int main() {
@@ -50,7 +55,7 @@ int main() {
 
     std::cout << "Earth pos: " << earth.pos.x << ", " << earth.pos.y << "\n";
     std::cout << "Sun mass:  " << sun.mass << "\n";
-    std::cout << "It compiled. You're good.\n";
+    std::cout << "Everything compiled, how suprising.\n";
 
     return 0;
 }
