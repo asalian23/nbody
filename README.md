@@ -12,6 +12,6 @@
 
 # Drift: x_(i+1) = x_i + v_(i+1/2) * ∆t — we plug in our velocity from Kick 1 to find our new position.
 
-# Kick 2: Using v_(i+1) = v_i + (1/2) * (a_i + a_(i+1)) * ∆t, distribute ∆t and (1/2), sub in Kick 1, and solve for final velocity using a_(i+1). This explanation is a bit unclear but it's not too hard to work out on paper.
+# Kick 2: Using v_(i+1) = v_i + (1/2) * (a_i + a_(i+1)) * ∆t, distribute ∆t and (1/2), sub in Kick 1, and solve for final velocity using a_(i+1). This gets us v_(i+1) = v_(i+1/2) + (1/2) * a_(i+1) * ∆t .
 
 # In a continuous loop, kick 1 and 2 can be merged into a single full step kick to half the number of needed velocity updates.
