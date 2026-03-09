@@ -1,0 +1,7 @@
+# Ignore compiled Windows executable files
+*.exe
+*.obj
+*.o
+
+# Ignore VS Code workspace settings (so you don't accidentally overwrite your editor settings if you clone this to a laptop later)
+.vscode/
