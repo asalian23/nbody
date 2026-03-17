@@ -1,0 +1,1 @@
+cl nBody.cpp /Fe:nbody.exe /EHsc /std:c++17 /I "C:\SFML\SFML-3.0.2\include" /link /LIBPATH:"C:\SFML\SFML-3.0.2\lib" sfml-graphics.lib sfml-window.lib sfml-system.lib
