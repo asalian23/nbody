@@ -15,3 +15,8 @@
 # Kick 2: Using v_(i+1) = v_i + (1/2) * (a_i + a_(i+1)) * ∆t, distribute ∆t and (1/2), sub in Kick 1, and solve for final velocity using a_(i+1). This gets us v_(i+1) = v_(i+1/2) + (1/2) * a_(i+1) * ∆t .
 
 # In a continuous loop, kick 1 and 2 can be merged into a single full step kick to half the number of needed velocity updates.
+
+# Yoshida 4th Order Integrator
+# After doing some more research, I've learned about another method to use in the n-body simulator
+# Yoshida is 3x more intensive than leapfrog, but it will allow us to have larger timesteps with the same or better accuracy than leapfrog.
+# Later on when we do CUDA I'll apply this, reducing the number of bodies we can have, but allowing us to simulate farther accurately with them.
