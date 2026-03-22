@@ -86,7 +86,6 @@ void drawTrail(sf::RenderWindow& window, std::deque<Vec3>& trail, sf::Color colo
 }
 
 int main() {
-    std::cout << "Started" << std::endl;
     std::vector<body> bodies;
 
     body earth;
@@ -114,7 +113,6 @@ int main() {
     std::deque<Vec3> earthT;
 
     sf::RenderWindow window(sf::VideoMode({800, 800}), "nbody sim");
-    std::cout << "window created" << std::endl; //Checking if the window got created, was having problems with dll files
     window.setFramerateLimit(240);
 
     while (window.isOpen()) {
