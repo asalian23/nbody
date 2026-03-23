@@ -7,4 +7,5 @@
 *.ipch
 *.lib
 *.dll
+cd.txt
 NbodyWorkRetypes.cpp

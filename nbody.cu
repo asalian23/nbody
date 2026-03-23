@@ -8,6 +8,7 @@
 __constant__ double G = 6.67430e-11;
 __constant__ double dt = 3600; //time per loop in seconds
 double scale = 300.0/1.496e11; //only used for drawing so just a double, this is px/AU, so earth would be 300 px away from the sun
+float centerPx = 400.0;
 
 struct Vec3 {
     double x, y, z;
@@ -36,15 +37,29 @@ struct body {
 
 __global__ void calcAccel(body* bodies, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x; //global index
+    __shared__ body tile[256]; //making shared memory space for one block
     if (idx>=N) return; //bounds check
     Vec3 locAcc(0, 0, 0); //local var to accumalate the acceleration, this avoids reading from slower VRAM each time
+    Vec3 locPos = bodies[idx].pos;  //saves one read from global
+    
+    for (int tileStartIdx=0; tileStartIdx<N; tileStartIdx+=256) { //loop through tiles
+        int globalLoadIdx = tileStartIdx + threadIdx.x; //This is so each thread knows which body from global to load into SM
+        if (globalLoadIdx < N) { //If we're in bounds
+            tile[threadIdx.x] = bodies[globalLoadIdx]; //load from full bodies array in global to SM
+        }
+        else {
+            tile[threadIdx.x] = body(); //if out of bounds just fill with an empty body, we can't return or break because then syncthreads() wont work.
+        }
+        
+        __syncthreads();
 
-    for (int i=0; i<N; i++) {
-        if (idx == i) continue; //skips itself
-        double r = (bodies[i].pos - bodies[idx].pos).magnitude(); //distance between bodies
-        double AccelMag = (G*bodies[i].mass)/(r*r);
-        Vec3 dir((bodies[i].pos - bodies[idx].pos).uVec()); //direction from body idx to body i
-        locAcc = locAcc + dir*AccelMag; //makes accel into a vector and then accumalates it
+        for (int i=0; i<256 && tileStartIdx + i < N; i++) { //now instead of looping through bodies we loop through the tile in SM, also making sure we skip the out of bounds bodies
+            if (idx == tileStartIdx + i) continue; //skips itself
+            double r = (tile[i].pos - locPos).magnitude(); //distance between bodies
+            double AccelMag = (G*tile[i].mass)/(r*r);
+            Vec3 dir((tile[i].pos - locPos).uVec()); //direction from body idx to body i
+            locAcc = locAcc + dir*AccelMag; //makes accel into a vector and then accumalates it
+        }
     }
     bodies[idx].acc = locAcc;
 }
@@ -85,8 +100,8 @@ void drawTrail(sf::RenderWindow& window, std::deque<Vec3>& trail, sf::Color colo
         sf::CircleShape dot(3.f);
         sf::Color fadingColor(color.r, color.g, color.b, opacity); //keeping the rgb and just adjusting opacity
         dot.setFillColor(fadingColor); //couldnt just input rgb and opacity here as it only takes a color input
-        float dotx = 400.f + trail[i].x * scale; //using floats as its just mapping to pixels, not much impact in this stage though
-        float doty = 400.f + trail[i].y * scale;
+        float dotx = centerPx+ trail[i].x * scale; //using floats as its just mapping to pixels, not much impact in this stage though
+        float doty = centerPx + trail[i].y * scale;
         dot.setPosition({dotx - 3.f, doty - 3.f}); //offsetting by the radius as the function sets the top left corner
         window.draw(dot);
     }
@@ -132,7 +147,7 @@ int main() {
     std::deque<Vec3> earthT;
 
     sf::RenderWindow window(sf::VideoMode({800, 800}), "nbody sim");
-    window.setFramerateLimit(240);
+    window.setFramerateLimit(60);
 
     while (window.isOpen()) {
         while (const std::optional event = window.pollEvent()) {
