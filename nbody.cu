@@ -4,11 +4,29 @@
 #include <deque>
 #include <cuda_runtime.h>
 #include <SFML/Graphics.hpp>
+#include <random>
+//cd "C:\Users\aryan\OneDrive\Documents\nBody"
 
-__constant__ double G = 6.67430e-11;
-__constant__ double dt = 3600; //time per loop in seconds
-double scale = 300.0/1.496e11; //only used for drawing so just a double, this is px/AU, so earth would be 300 px away from the sun
-float centerPx = 400.0;
+//10k
+//Barnes-Hut
+//3D
+//Collisions
+//compile gui engine into a dll and use python UI side, goal is to seperating the gui side and the calculation side between python and cpp
+//Data vizualition with python using CUDA reduction kernel
+//use Pybind11, library to expose cpp functions to python, connecting c++ with python
+//import nbody_engine
+
+//Set
+__constant__ double G_device = 6.67430e-11;
+const double G_host = 6.67430e-11;
+const double Pi = 3.14159265358979323846;
+
+//Alterable
+__constant__ double dt = 10; //time progressed per frame in seconds
+const double maxRadius = 3 * 1.496e11; //3 AU
+const double Scale = 600.0/maxRadius; //screen width some margins divided by the max radius
+float centerPx = 1280.0f;
+float centerPy = 720.0f;
 
 struct Vec3 {
     double x, y, z;
@@ -56,7 +74,7 @@ __global__ void calcAccel(body* bodies, int N) {
         for (int i=0; i<256 && tileStartIdx + i < N; i++) { //now instead of looping through bodies we loop through the tile in SM, also making sure we skip the out of bounds bodies
             if (idx == tileStartIdx + i) continue; //skips itself
             double r = (tile[i].pos - locPos).magnitude(); //distance between bodies
-            double AccelMag = (G*tile[i].mass)/(r*r);
+            double AccelMag = (G_device*tile[i].mass)/(r*r);
             Vec3 dir((tile[i].pos - locPos).uVec()); //direction from body idx to body i
             locAcc = locAcc + dir*AccelMag; //makes accel into a vector and then accumalates it
         }
@@ -94,42 +112,46 @@ void updateTrail(std::deque<Vec3>& trail, const body& b, int maxLength) {
     }
 }
 
-void drawTrail(sf::RenderWindow& window, std::deque<Vec3>& trail, sf::Color color, double scale) {
+void drawTrail(sf::RenderWindow& window, std::deque<Vec3>& trail, sf::Color color, double Scale) {
     for (int i=0; i<trail.size(); i++) {
         int opacity = .125 * 255 * (1.0 - (float)i / trail.size()); //1-i/size decreases the opacity along the trail
         sf::CircleShape dot(3.f);
         sf::Color fadingColor(color.r, color.g, color.b, opacity); //keeping the rgb and just adjusting opacity
         dot.setFillColor(fadingColor); //couldnt just input rgb and opacity here as it only takes a color input
-        float dotx = centerPx+ trail[i].x * scale; //using floats as its just mapping to pixels, not much impact in this stage though
-        float doty = centerPx + trail[i].y * scale;
+        float dotx = centerPx+ trail[i].x * Scale; //using floats as its just mapping to pixels, not much impact in this stage though
+        float doty = centerPx + trail[i].y * Scale;
         dot.setPosition({dotx - 3.f, doty - 3.f}); //offsetting by the radius as the function sets the top left corner
         window.draw(dot);
     }
 }
 
-int main() {
-    //Set up bodes vector
+std::vector<body> initRandBodies(int N) {
     std::vector<body> bodies;
 
-    body earth;
-    earth.mass = 5.972e24;
-    earth.pos  = Vec3(1.496e11, 0, 0); // 1 AU (the average distance of the earth from the sun) from origin
-    earth.vel  = Vec3(0, 29783, 0);    // orbital velocity in m/s
+    std::mt19937 rng(23); //set seed for replicable results
+    std::uniform_real_distribution<double> angleRange(0, 2 * Pi);
+    std::uniform_real_distribution<double> radiusRange(0, maxRadius);
 
-    body sun;
-    sun.mass = 1.989e30;
-    sun.pos  = Vec3(0, 0, 0); 
-    sun.vel  = Vec3(0, 0, 0);
+    body centralBody; //pos and vel is 0 by default
+    centralBody.mass = 1e38; //very big black hole
+    bodies.push_back(centralBody);
 
-    body jupiter;
-    jupiter.mass = 1.898e27;
-    jupiter.pos = Vec3(7.785e11, 0, 0);
-    jupiter.vel = Vec3(0, 13070, 0);
+    for (int i=0; i<N; i++) {
+        body temp;
+        temp.mass = 1.989e30; //set mass for all bodies to the same mass, earth, for now because otherwise initial velocity would be difficult to do
+        double ang = angleRange(rng); //randomizing through polar and then converting to cartesian
+        double r = radiusRange(rng);
+        temp.pos = Vec3(r*cos(ang), r*sin(ang), 0); //initialize a random position
+        double vel = sqrt(G_host * centralBody.mass/r);
+        temp.vel = Vec3(vel * (-temp.pos.y/r), vel * (temp.pos.x/r), 0); //Finds the unit vector perpendicular to the radius and scales it to velocity
+        bodies.push_back(temp);
+    }
+    return bodies;
+}
 
-    bodies.push_back(sun);
-    bodies.push_back(earth);
-    bodies.push_back(jupiter);
-
+int main() {
+    //generate N random bodies
+    std::vector<body> bodies = initRandBodies(100000);
     //GPU prep
     int N = bodies.size();
     int threadsPerBlock = 256;
@@ -143,11 +165,17 @@ int main() {
     //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
 
     //trail pos storage
-    std::deque<Vec3> sunT;
-    std::deque<Vec3> earthT;
+    //std::deque<Vec3> sunT;
+    //std::deque<Vec3> earthT;
 
-    sf::RenderWindow window(sf::VideoMode({800, 800}), "nbody sim");
+    sf::RenderWindow window(sf::VideoMode({2560, 1440}), "nbody sim");
     window.setFramerateLimit(60);
+
+    //inits for benchmarking
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    int frameCount = 0;
 
     while (window.isOpen()) {
         while (const std::optional event = window.pollEvent()) {
@@ -155,33 +183,39 @@ int main() {
                 window.close();
             }
         }
+        cudaEventRecord(t0); //record starting time
 
         leapfrog(d_bodies, N, numBlocks, threadsPerBlock); //increment position each frame
+
+        cudaEventRecord(t1); //record ending time
+        cudaEventSynchronize(t1);
+        float ms;
+        cudaEventElapsedTime(&ms, t0, t1); //saves elapsed time to ms
+
+        frameCount++;
+        if (frameCount % 10 == 0) { //prints ms per frame every x frames to avoid console clog
+            printf("N=%d  %.2f ms/frame\n", N, ms);
+        }
+
         cudaDeviceSynchronize(); //finish updating bodies positions before copying back to CPU
-        cudaMemcpy(bodies.data(), d_bodies, N * sizeof(body), cudaMemcpyDeviceToHost); //copy data back to CPU for drawing
+        cudaMemcpy(bodies.data(), d_bodies, N * sizeof(body), cudaMemcpyDeviceToHost); //copy data back to CPU for drawing (cpu bottleneck), fix with OpenGL vbo later
         window.clear(); //clear the old frame
         
-        //draw sun
-        sf::CircleShape sunC(50.f);
-        sunC.setFillColor(sf::Color::Yellow);
-        float sx = 400.f + bodies[0].pos.x * scale;
-        float sy = 400.f + bodies[0].pos.y * scale;
-        sunC.setPosition({sx - 50.f, sy - 50.f}); //as it outputs at the top left, we offset so the center is at the desired point
-        window.draw(sunC);
+        sf::VertexArray points(sf::PrimitiveType::Points, N); //VectorArray requires one draw call per frame rather than bodies draw calls per frame in previous logic
+        for (int i=0; i<N; i++) {
+            float px = centerPx + bodies[i].pos.x * Scale;
+            float py = centerPy + bodies[i].pos.y * Scale;
+            points[i].position = {px, py};
+            points[i].color = sf::Color::White;
+        }
+        window.draw(points);
 
-        //draw earth
-        sf::CircleShape earthC(20.f);
-        earthC.setFillColor(sf::Color::Blue);
-        float ex = 400.f + bodies[1].pos.x * scale;
-        float ey = 400.f + bodies[1].pos.y * scale;
-        earthC.setPosition({ex - 20.f, ey - 20.f});
-        window.draw(earthC);
-
+        /*
         //draw and update trails
         updateTrail(earthT, bodies[1], 1250); //The variables "earth" and "sun" don't change after being pushed back so we use the versions being updated in bodies.
         updateTrail(sunT, bodies[0], 1250);
-        drawTrail(window, earthT, sf::Color::Blue, scale);
-        drawTrail(window, sunT, sf::Color::Yellow, scale);
+        drawTrail(window, earthT, sf::Color::Blue, Scale);
+        drawTrail(window, sunT, sf::Color::Yellow, Scale); */
 
         window.display();
     }
