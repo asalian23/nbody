@@ -5,7 +5,6 @@
 #include <cuda_runtime.h>
 #include <SFML/Graphics.hpp>
 #include <random>
-//cd "C:\Users\aryan\OneDrive\Documents\nBody"
 
 //10k
 //Barnes-Hut
@@ -18,11 +17,21 @@
 
 //Set
 __constant__ double G_device = 6.67430e-11;
+
 const double G_host = 6.67430e-11;
 const double Pi = 3.14159265358979323846;
 
 //Alterable
+const int N = 10000; //number of bodies
+
 __constant__ double dt = 10; //time progressed per frame in seconds
+__constant__ double epsilon_device = 6.96e8; //sun radius in meters
+__constant__ double theta_device = 0.5;
+
+const double epsilon_host = 6.96e8;
+const double theta_host = 0.5;
+const int maxDepth = 21; //ensures we don't have a stack overflow in the gpu
+const int maxNodes = N*8; //worst case node usage, each body insertion creates at most 4 bodies, and then there's some padding.
 const double maxRadius = 3 * 1.496e11; //3 AU
 const double Scale = 600.0/maxRadius; //screen width some margins divided by the max radius
 float centerPx = 1280.0f;
@@ -53,6 +62,84 @@ struct body {
     double mass;
 };
 
+struct quadNode {
+    Vec3 centerOfMass;
+    Vec3 centerPos;
+    double totalMass, size; 
+    int children[4], bodyIdx;
+};
+
+void resetNode(quadNode& node) {
+    node.centerOfMass = Vec3();
+    node.centerPos = Vec3();
+    node.totalMass = 0;
+    node.size = 0;
+    node.bodyIdx = -1;
+    for (int i=0; i<4; i++) node.children[i] = -1;
+}
+
+quadNode getRootNode(const std::vector<body>& bodies) {
+    double xMin = bodies[0].pos.x;
+    double xMax = bodies[0].pos.x;
+    double yMin = bodies[0].pos.y;
+    double yMax = bodies[0].pos.y;
+
+    for (int i=0; i<bodies.size(); i++) {
+        xMin = std::min(xMin, bodies[i].pos.x);
+        xMax = std::max(xMax, bodies[i].pos.x);
+        yMin = std::min(yMin, bodies[i].pos.y);
+        yMax = std::max(yMax, bodies[i].pos.y);
+    }
+
+    quadNode root;
+    resetNode(root);
+    root.size = std::max(xMax-xMin, yMax-yMin) * 1.01; //Multiplying by 1.01 handles rare edge cases
+    root.centerPos = Vec3((xMin + xMax)/2.0, (yMin + yMax)/2.0, 0);
+    
+    return root;
+}
+
+int getQuadrant(const body& b, const quadNode& node) {
+    return (b.pos.x >= node.centerPos.x) | ((b.pos.y >= node.centerPos.y) << 1); //using bitwise to avoid branching
+}
+
+void calcChildCenterPos (const quadNode& parent, const int& quadrant, Vec3& childCenterPos) {
+    int xBit = quadrant & 1; //extract bits, the & operator only keeps the int n bits from the left
+    int yBit = (quadrant >> 1) & 1;
+    double shift = parent.size /4.0; //shift is 1/4 of parent node width
+
+    //2*bit - 1, will turn the 0 or 1 into -1 or 1 nicely to apply shift
+    childCenterPos.x = parent.centerPos.x + (2 * xBit - 1) * shift;
+    childCenterPos.y = parent.centerPos.y + (2 * yBit - 1) * shift;
+    childCenterPos.z = parent.centerPos.z;
+}
+
+void insertBody(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& nodeCount, int bodyIdx, int nodeIdx, int currDepth) { //This function must be seperate as it recurses into itself
+    body& currBody = bodies[bodyIdx];
+    quadNode& currNode = nodes[nodeIdx];
+    //First case, empty node
+    if (currNode.bodyIdx != -1 && currNode.children[0] == -1) {
+        currNode.bodyIdx = bodyIdx;
+        currNode.totalMass = currBody.mass;
+        currNode.centerOfMass = currBody.mass;
+        return;
+    }
+    //Second case, leaf node + depth check
+    if (currNode.bodyIdx != -1) {
+        if (currDepth > maxDepth) return; //If the masses are stored so close together we can't seperate them after 21 splits (430 km apart), drop the body. Yes its technically inaccurate but the error is minor. Also, we can fix this eventually with linked lists.
+        //LEAVING OFF HERE ATM, NEXT IS ADDING THE FOUR CHILDREN AND REDISTRIBUTING THE BODY THAT WAS PRESENT IN THE LEAF NODE, AND CONVERTING IT TO AN INTERNAL NODE
+    }
+}
+
+void fillTree(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& nodeCount) { //loops through bodies and inserts each one
+    nodeCount = 1; //the root node, nodeCount represents both the number of node's allocated and the next avalaible nodeIdx
+    nodes[0] = getRootNode(bodies);
+
+    for (int bodyIdx=0; bodyIdx<N; bodyIdx++) {
+        insertBody(bodies, nodes, nodeCount, bodyIdx, 0, 0);
+    }
+}
+
 __global__ void calcAccel(body* bodies, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x; //global index
     __shared__ body tile[256]; //making shared memory space for one block
@@ -74,7 +161,7 @@ __global__ void calcAccel(body* bodies, int N) {
         for (int i=0; i<256 && tileStartIdx + i < N; i++) { //now instead of looping through bodies we loop through the tile in SM, also making sure we skip the out of bounds bodies
             if (idx == tileStartIdx + i) continue; //skips itself
             double r = (tile[i].pos - locPos).magnitude(); //distance between bodies
-            double AccelMag = (G_device*tile[i].mass)/(r*r);
+            double AccelMag = (G_device*tile[i].mass)/(r*r + epsilon_device * epsilon_device); //I added a smoothing variable epsilon here, preventing the forces from exploding if the object gets to close to the central mass
             Vec3 dir((tile[i].pos - locPos).uVec()); //direction from body idx to body i
             locAcc = locAcc + dir*AccelMag; //makes accel into a vector and then accumalates it
         }
@@ -138,7 +225,7 @@ std::vector<body> initRandBodies(int N) {
 
     for (int i=0; i<N; i++) {
         body temp;
-        temp.mass = 1.989e30; //set mass for all bodies to the same mass, earth, for now because otherwise initial velocity would be difficult to do
+        temp.mass = 1.989e30; //set mass for all bodies to the same mass, the sun, for now because otherwise initial velocity would be difficult to do
         double ang = angleRange(rng); //randomizing through polar and then converting to cartesian
         double r = radiusRange(rng);
         temp.pos = Vec3(r*cos(ang), r*sin(ang), 0); //initialize a random position
@@ -151,9 +238,8 @@ std::vector<body> initRandBodies(int N) {
 
 int main() {
     //generate N random bodies
-    std::vector<body> bodies = initRandBodies(100000);
+    std::vector<body> bodies = initRandBodies(N);
     //GPU prep
-    int N = bodies.size();
     int threadsPerBlock = 256;
     int numBlocks = (N+threadsPerBlock-1)/threadsPerBlock;
     
@@ -221,5 +307,7 @@ int main() {
     }
 
     cudaFree(d_bodies);
+    cudaEventDestroy(t0);
+    cudaEventDestroy(t1);
     return 0;
 }
