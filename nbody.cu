@@ -115,20 +115,39 @@ void calcChildCenterPos (const quadNode& parent, const int& quadrant, Vec3& chil
 }
 
 void insertBody(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& nodeCount, int bodyIdx, int nodeIdx, int currDepth) { //This function must be seperate as it recurses into itself
-    body& currBody = bodies[bodyIdx];
+    const body& currBody = bodies[bodyIdx];
     quadNode& currNode = nodes[nodeIdx];
+
     //First case, empty node
-    if (currNode.bodyIdx != -1 && currNode.children[0] == -1) {
+    if (currNode.bodyIdx == -1 && currNode.children[0] == -1) {
         currNode.bodyIdx = bodyIdx;
         currNode.totalMass = currBody.mass;
-        currNode.centerOfMass = currBody.mass;
+        currNode.centerOfMass = currBody.pos;
         return;
     }
+
     //Second case, leaf node + depth check
     if (currNode.bodyIdx != -1) {
         if (currDepth > maxDepth) return; //If the masses are stored so close together we can't seperate them after 21 splits (430 km apart), drop the body. Yes its technically inaccurate but the error is minor. Also, we can fix this eventually with linked lists.
-        //LEAVING OFF HERE ATM, NEXT IS ADDING THE FOUR CHILDREN AND REDISTRIBUTING THE BODY THAT WAS PRESENT IN THE LEAF NODE, AND CONVERTING IT TO AN INTERNAL NODE
+        for (int i=0; i<4; i++) {
+            quadNode& currChildNode = nodes[nodeCount];
+            currNode.children[i] = nodeCount; //idx of child node is next avaliable nodeIdx
+            resetNode(currChildNode); //init child node
+            currChildNode.size = currNode.size / 2.0; //sets child size
+            calcChildCenterPos(currNode, i, currChildNode.centerPos); //sets child center
+            nodeCount++;
+        }
+        //the previously leaf node, now parent node, still needs its bodyIdx reset. Note that it will have an incorrect mass and com value, but those will be set properly through the bottom up pass later
+        int prevSetBodyIdx = currNode.bodyIdx;
+        currNode.bodyIdx = -1;
+        insertBody(bodies, nodes, nodeCount, prevSetBodyIdx, nodeIdx, currDepth+1); //Note that we're inserting into nodeIdx, or the parent node still, and it will recurse into the current child itself
+        insertBody(bodies, nodes, nodeCount, bodyIdx, nodeIdx, currDepth+1); //Now we insert the new body
+        return; //Stops this run, otherwise the new internal node will be subjected to case 3.
     }
+
+    //Third Case, internal node
+    int quadrant = getQuadrant(currBody, currNode);
+    insertBody(bodies, nodes, nodeCount, bodyIdx, currNode.children[quadrant], currDepth+1);
 }
 
 void fillTree(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& nodeCount) { //loops through bodies and inserts each one
