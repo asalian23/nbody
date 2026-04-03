@@ -6,7 +6,7 @@
 #include <SFML/Graphics.hpp>
 #include <random>
 
-//10k
+//10k - Done
 //Barnes-Hut
 //3D
 //Collisions
@@ -23,6 +23,7 @@ const double Pi = 3.14159265358979323846;
 
 //Alterable
 const int N = 10000; //number of bodies
+__constant__ int N = 10000;
 
 __constant__ double dt = 10; //time progressed per frame in seconds
 __constant__ double epsilon_device = 6.96e8; //sun radius in meters
@@ -114,12 +115,15 @@ void calcChildCenterPos (const quadNode& parent, const int& quadrant, Vec3& chil
     childCenterPos.z = parent.centerPos.z;
 }
 
+//The next function also builds the tree. Note - This is a sparse tree, so watch out for nonexistent nodes when recursing
 void insertBody(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& nodeCount, int bodyIdx, int nodeIdx, int currDepth) { //This function must be seperate as it recurses into itself
     const body& currBody = bodies[bodyIdx];
     quadNode& currNode = nodes[nodeIdx];
 
+    bool hasChildren = (currNode.children[0] != -1 || currNode.children[1] != -1 || currNode.children[2] != -1 || currNode.children[3] != -1);
+
     //First case, empty node
-    if (currNode.bodyIdx == -1 && currNode.children[0] == -1) {
+    if (currNode.bodyIdx == -1 && !hasChildren) { //If a node has no body in it and no children it is an empty node
         currNode.bodyIdx = bodyIdx;
         currNode.totalMass = currBody.mass;
         currNode.centerOfMass = currBody.pos;
@@ -129,24 +133,36 @@ void insertBody(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& no
     //Second case, leaf node + depth check
     if (currNode.bodyIdx != -1) {
         if (currDepth > maxDepth) return; //If the masses are stored so close together we can't seperate them after 21 splits (430 km apart), drop the body. Yes its technically inaccurate but the error is minor. Also, we can fix this eventually with linked lists.
-        for (int i=0; i<4; i++) {
-            quadNode& currChildNode = nodes[nodeCount];
-            currNode.children[i] = nodeCount; //idx of child node is next avaliable nodeIdx
-            resetNode(currChildNode); //init child node
-            currChildNode.size = currNode.size / 2.0; //sets child size
-            calcChildCenterPos(currNode, i, currChildNode.centerPos); //sets child center
-            nodeCount++;
-        }
+        
         //the previously leaf node, now parent node, still needs its bodyIdx reset. Note that it will have an incorrect mass and com value, but those will be set properly through the bottom up pass later
-        int prevSetBodyIdx = currNode.bodyIdx;
+        int prevBodyIdx = currNode.bodyIdx;
+        int prevBodyQuadrant = getQuadrant(bodies[prevBodyIdx], currNode); //prev body quadrant used to init the space for the prev body
         currNode.bodyIdx = -1;
-        insertBody(bodies, nodes, nodeCount, prevSetBodyIdx, nodeIdx, currDepth+1); //Note that we're inserting into nodeIdx, or the parent node still, and it will recurse into the current child itself
-        insertBody(bodies, nodes, nodeCount, bodyIdx, nodeIdx, currDepth+1); //Now we insert the new body
-        return; //Stops this run, otherwise the new internal node will be subjected to case 3.
+        
+        //The following logic is to readd the previous body to the appropriate child node
+        quadNode& currChildNode = nodes[nodeCount]; //sets the childnodes location to next avaliable spot in nodes array
+        currNode.children[prevBodyQuadrant] = nodeCount; //idx of child node is next avaliable nodeIdx
+        resetNode(currChildNode); //init child node
+        currChildNode.size = currNode.size / 2.0; //sets child size
+        calcChildCenterPos(currNode, prevBodyQuadrant, currChildNode.centerPos); //sets child center
+        nodeCount++;
+
+        //For the following insertion we are still passing the parent's nodeIdx to let case 3 handle recursing into the child nodes, and as such we do not increment the depth
+        insertBody(bodies, nodes, nodeCount, prevBodyIdx, nodeIdx, currDepth);
+        //Not returning here like in the dense tree, for the sparse tree we don't know which node needs to be initialized for the new body, so we let case 3 handle that and let the parent node naturally fall into it.
     }
 
     //Third Case, internal node
     int quadrant = getQuadrant(currBody, currNode);
+
+    if (currNode.children[quadrant] == -1) {
+        quadNode& currChildNode = nodes[nodeCount]; //sets the childnodes location to next avaliable spot in nodes array
+        currNode.children[quadrant] = nodeCount; //idx of child node is next avaliable nodeIdx
+        resetNode(currChildNode); //init child node
+        currChildNode.size = currNode.size / 2.0; //sets child size
+        calcChildCenterPos(currNode, quadrant, currChildNode.centerPos); //sets child center
+        nodeCount++;
+    }
     insertBody(bodies, nodes, nodeCount, bodyIdx, currNode.children[quadrant], currDepth+1);
 }
 
@@ -159,7 +175,68 @@ void fillTree(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& node
     }
 }
 
-__global__ void calcAccel(body* bodies, int N) {
+void computeCOM(std::vector<quadNode>& nodes, int& nodeIdx) {
+    quadNode& currNode = nodes[nodeIdx];
+    
+    //Case 1, empty node
+    if (currNode.bodyIdx == -1 && currNode.children[0] == -1) {
+        return;
+    }
+
+    //Case 2, leaf node
+    if (currNode.bodyIdx != -1) {
+        return; //we also don't do anything here as its com and total mass are set correctly already in the insertBody function
+    }
+
+    //Case 3, internal node
+    double totalMass = 0.0;
+    Vec3 weightedMass;
+    for (int i=0; i<4; i++) { //go through each child
+        if (currNode.children[i] != -1) { //will cause error trying to acces nodes[-1] if the child doesn't exist because sparse trees don't initialize empty nodes
+            computeCOM(nodes, currNode.children[i]); //recurse down to compute com for each child, and then those recurse and so on, making this a bottom up search
+            
+            quadNode& currChild = nodes[currNode.children[i]];
+            totalMass += currChild.totalMass;
+            weightedMass = weightedMass + currChild.centerOfMass * currChild.totalMass; 
+        }
+    }
+
+    currNode.totalMass = totalMass;
+    currNode.centerOfMass = weightedMass * (1/totalMass);
+    return;
+}
+
+__global__ void calcAccel(int idx, body* bodies, quadNode* nodes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x; //global index
+    if (idx > N) return; //bounds check
+    Vec3 locAcc(0, 0, 0); //local var to accumalte acceleration
+    Vec3 locPos = bodies[idx].pos; //local position to avoid global reads
+    int stack[64]; //A max stack size of 64 allows for (maxDepth * 3) + 1 <= 64, so 21 splits, meaning our minimum node size is 430 km
+    int stackTop = 1; //variable to manage iterating through the stack
+    stack[0] = 0; //setting the first item in stack to the idx of the root node
+
+    while (stackTop > 0) {
+        stackTop--;
+        quadNode& currNode = nodes[stackTop];
+        
+        //Case 1, empty nodes
+        if (currNode.totalMass == 0) continue; //Skipping empty nodes
+
+        //Case 2, leaf nodes
+        if (currNode.bodyIdx != -1) {
+            if (node.bodyIdx == idx) continue; //the body skips itself
+
+            double r = (currNode.centerOfMass - locPos).magnitude(); //distance between bodies
+            double AccelMag = (G_device*currNode.totalMass)/(r*r + epsilon_device * epsilon_device); //I added a smoothing variable epsilon here, preventing the forces from exploding if the object gets to close to the central mass
+            Vec3 dir((currNode.centerOfMass - locPos).uVec()); //direction from body idx to body i
+            locAcc = locAcc + dir*AccelMag; //makes accel into a Vec3 and then accumalates it
+        }
+
+    }
+}
+
+/*
+__global__ void calcAccelOld(body* bodies, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x; //global index
     __shared__ body tile[256]; //making shared memory space for one block
     if (idx>=N) return; //bounds check
@@ -187,6 +264,7 @@ __global__ void calcAccel(body* bodies, int N) {
     }
     bodies[idx].acc = locAcc;
 }
+*/
 
 __global__ void leapfrogPartOne(body* bodies, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -208,27 +286,6 @@ void leapfrog(body* d_bodies, int N, int numBlocks, int threadsPerBlock) {
     leapfrogPartOne<<<numBlocks, threadsPerBlock>>>(d_bodies, N); //Applies kick 1 and drift
     calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, N); //Calculates next acceleration
     leapfrogPartTwo<<<numBlocks, threadsPerBlock>>>(d_bodies, N); //Applies kick 2
-}
-
-//same two trail functions from CPU code
-void updateTrail(std::deque<Vec3>& trail, const body& b, int maxLength) {
-    trail.push_front(b.pos);
-    if (trail.size() > maxLength) {
-        trail.pop_back();
-    }
-}
-
-void drawTrail(sf::RenderWindow& window, std::deque<Vec3>& trail, sf::Color color, double Scale) {
-    for (int i=0; i<trail.size(); i++) {
-        int opacity = .125 * 255 * (1.0 - (float)i / trail.size()); //1-i/size decreases the opacity along the trail
-        sf::CircleShape dot(3.f);
-        sf::Color fadingColor(color.r, color.g, color.b, opacity); //keeping the rgb and just adjusting opacity
-        dot.setFillColor(fadingColor); //couldnt just input rgb and opacity here as it only takes a color input
-        float dotx = centerPx+ trail[i].x * Scale; //using floats as its just mapping to pixels, not much impact in this stage though
-        float doty = centerPx + trail[i].y * Scale;
-        dot.setPosition({dotx - 3.f, doty - 3.f}); //offsetting by the radius as the function sets the top left corner
-        window.draw(dot);
-    }
 }
 
 std::vector<body> initRandBodies(int N) {
@@ -258,6 +315,8 @@ std::vector<body> initRandBodies(int N) {
 int main() {
     //generate N random bodies
     std::vector<body> bodies = initRandBodies(N);
+    //Init nodes vector
+    std::vector<quadNode> nodes(maxNodes);
     //GPU prep
     int threadsPerBlock = 256;
     int numBlocks = (N+threadsPerBlock-1)/threadsPerBlock;
