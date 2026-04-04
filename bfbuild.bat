@@ -1,0 +1,1 @@
+nvcc bruteforce.cu -o bf.exe -std=c++17 -diag-suppress 1394 -diag-suppress 1388 -I "C:\SFML\SFML-3.0.2\include" -L "C:\SFML\SFML-3.0.2\lib" -lsfml-graphics -lsfml-window -lsfml-system

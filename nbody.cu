@@ -316,7 +316,7 @@ std::vector<body> initRandBodies(int N) {
 
     std::mt19937 rng(23); //set seed for replicable results
     std::uniform_real_distribution<double> angleRange(0, 2 * Pi);
-    std::uniform_real_distribution<double> radiusRange(0, maxRadius);
+    std::uniform_real_distribution<double> radiusRange(1e6, maxRadius); //Everything spawns at least 1000 km away from the central mass
 
     body centralBody; //pos and vel is 0 by default
     centralBody.mass = 1e38; //very big black hole
