@@ -117,7 +117,7 @@ int main() {
 
     while (window.isOpen()) {
         while (const std::optional event = window.pollEvent()) {
-            if (event->is<sf::Event::Closed>()) {
+            if (event->is<sf::Event::Closed>()) {   
                 window.close();
             }
         }

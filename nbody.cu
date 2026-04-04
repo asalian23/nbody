@@ -22,8 +22,7 @@ const double G_host = 6.67430e-11;
 const double Pi = 3.14159265358979323846;
 
 //Alterable
-const int N = 10000; //number of bodies
-__constant__ int N = 10000;
+const int N = 100000; //number of bodies
 
 __constant__ double dt = 10; //time progressed per frame in seconds
 __constant__ double epsilon_device = 6.96e8; //sun radius in meters
@@ -33,7 +32,7 @@ const double epsilon_host = 6.96e8;
 const double theta_host = 0.5;
 const int maxDepth = 21; //ensures we don't have a stack overflow in the gpu
 const int maxNodes = N*8; //worst case node usage, each body insertion creates at most 4 bodies, and then there's some padding.
-const double maxRadius = 3 * 1.496e11; //3 AU
+const double maxRadius = 15 * 1.496e11; //first number AU
 const double Scale = 600.0/maxRadius; //screen width some margins divided by the max radius
 float centerPx = 1280.0f;
 float centerPy = 720.0f;
@@ -167,6 +166,8 @@ void insertBody(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& no
 }
 
 void fillTree(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& nodeCount) { //loops through bodies and inserts each one
+    for (int i=0; i<nodeCount; i++) resetNode(nodes[i]); //resets the old nodes
+
     nodeCount = 1; //the root node, nodeCount represents both the number of node's allocated and the next avalaible nodeIdx
     nodes[0] = getRootNode(bodies);
 
@@ -175,11 +176,13 @@ void fillTree(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& node
     }
 }
 
-void computeCOM(std::vector<quadNode>& nodes, int& nodeIdx) {
+void computeCOM(std::vector<quadNode>& nodes, int nodeIdx) { //nodeIdx is just read not changed so we don't pass by reference
     quadNode& currNode = nodes[nodeIdx];
+
+    bool hasChildren = (currNode.children[0] != -1 || currNode.children[1] != -1 || currNode.children[2] != -1 || currNode.children[3] != -1);
     
     //Case 1, empty node
-    if (currNode.bodyIdx == -1 && currNode.children[0] == -1) {
+    if (currNode.bodyIdx == -1 && !hasChildren) {
         return;
     }
 
@@ -206,9 +209,9 @@ void computeCOM(std::vector<quadNode>& nodes, int& nodeIdx) {
     return;
 }
 
-__global__ void calcAccel(int idx, body* bodies, quadNode* nodes) {
+__global__ void calcAccel(body* bodies, quadNode* nodes) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x; //global index
-    if (idx > N) return; //bounds check
+    if (idx >= N) return; //bounds check
     Vec3 locAcc(0, 0, 0); //local var to accumalte acceleration
     Vec3 locPos = bodies[idx].pos; //local position to avoid global reads
     int stack[64]; //A max stack size of 64 allows for (maxDepth * 3) + 1 <= 64, so 21 splits, meaning our minimum node size is 430 km
@@ -217,22 +220,32 @@ __global__ void calcAccel(int idx, body* bodies, quadNode* nodes) {
 
     while (stackTop > 0) {
         stackTop--;
-        quadNode& currNode = nodes[stackTop];
+        quadNode& currNode = nodes[stack[stackTop]];
         
         //Case 1, empty nodes
         if (currNode.totalMass == 0) continue; //Skipping empty nodes
 
-        //Case 2, leaf nodes
-        if (currNode.bodyIdx != -1) {
-            if (node.bodyIdx == idx) continue; //the body skips itself
+        //Case 2, leaf nodes and internal nodes that satisfy theta
+        if (currNode.bodyIdx != -1 || (currNode.size / (currNode.centerOfMass - locPos).magnitude()) <= theta_device) {
+            if (currNode.bodyIdx == idx) continue; //the body skips itself
 
             double r = (currNode.centerOfMass - locPos).magnitude(); //distance between bodies
             double AccelMag = (G_device*currNode.totalMass)/(r*r + epsilon_device * epsilon_device); //I added a smoothing variable epsilon here, preventing the forces from exploding if the object gets to close to the central mass
             Vec3 dir((currNode.centerOfMass - locPos).uVec()); //direction from body idx to body i
             locAcc = locAcc + dir*AccelMag; //makes accel into a Vec3 and then accumalates it
+
+            continue;
         }
 
+        //Case 3, internal nodes that do not satisfy theta
+        for (int i=0; i<4; i++) {
+            if (currNode.children[i] != -1) {
+                stack[stackTop++] = currNode.children[i];
+            }
+        }
     }
+
+    bodies[idx].acc = locAcc;
 }
 
 /*
@@ -282,10 +295,20 @@ __global__ void leapfrogPartTwo(body* bodies, int N) {
     bodies[idx].vel = bodies[idx].vel + bodies[idx].acc * 0.5 * dt; //Applies kick 2
 }
 
-void leapfrog(body* d_bodies, int N, int numBlocks, int threadsPerBlock) {
-    leapfrogPartOne<<<numBlocks, threadsPerBlock>>>(d_bodies, N); //Applies kick 1 and drift
-    calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, N); //Calculates next acceleration
-    leapfrogPartTwo<<<numBlocks, threadsPerBlock>>>(d_bodies, N); //Applies kick 2
+void leapfrog(body* d_bodies, std::vector<body>& bodies, quadNode* d_nodes, std::vector<quadNode>& nodes, int& nodeCount, int numBlocks, int threadsPerBlock) {
+    //Kick 1 + Drift and bring updated bodis back to cpu
+        leapfrogPartOne<<<numBlocks, threadsPerBlock>>>(d_bodies, N);
+        cudaDeviceSynchronize();
+        cudaMemcpy(bodies.data(), d_bodies, N*sizeof(body), cudaMemcpyDeviceToHost);
+
+        //Now logic to recalculate acceleration
+        fillTree(bodies, nodes, nodeCount); //nodeCount's value right now is the nodes used in the previous tree, we pass that so fillTree knows how many nodes to reset.
+        computeCOM(nodes, 0); //Always need to set the coms and masses after building the tree
+        cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(quadNode), cudaMemcpyHostToDevice); //Here nodeCount represents the nodes used to build the current tree, so we only need to copy that amount of nodes over
+        calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes); //now we actually run the function to calculate the new accelerations
+
+        //Kick 2
+        leapfrogPartTwo<<<numBlocks, threadsPerBlock>>>(d_bodies, N);
 }
 
 std::vector<body> initRandBodies(int N) {
@@ -299,7 +322,7 @@ std::vector<body> initRandBodies(int N) {
     centralBody.mass = 1e38; //very big black hole
     bodies.push_back(centralBody);
 
-    for (int i=0; i<N; i++) {
+    for (int i=0; i<N-1; i++) { //our memcpy and malloc function copy exactly N, and with the central body we have N+1 bodies, so we just randomize N-1 bodies.
         body temp;
         temp.mass = 1.989e30; //set mass for all bodies to the same mass, the sun, for now because otherwise initial velocity would be difficult to do
         double ang = angleRange(rng); //randomizing through polar and then converting to cartesian
@@ -322,15 +345,22 @@ int main() {
     int numBlocks = (N+threadsPerBlock-1)/threadsPerBlock;
     
     //Prep for main logic
+    //Bodies prep
     body* d_bodies;
-    cudaMalloc(&d_bodies, N * sizeof(body)); //Reserve VRAM
+    cudaMalloc(&d_bodies, N * sizeof(body)); //Reserve VRAM for bodies and nodes
     cudaMemcpy(d_bodies, bodies.data(), N*sizeof(body), cudaMemcpyHostToDevice); //Copies vector to GPU
-    calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, N); //assign initial acceleration to bodies
-    //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
 
-    //trail pos storage
-    //std::deque<Vec3> sunT;
-    //std::deque<Vec3> earthT;
+    //Nodes Prep
+    quadNode* d_nodes;
+    int nodeCount = 0; //We create nodeCount outside fillTree so we only allocate space for the neccesary amount of nodes rather than the max each time. Its also set to 0 so the resetNodes loop works without error in the first treebuild.
+    fillTree(bodies, nodes, nodeCount); //Fills the node tree with bodies
+    computeCOM(nodes, 0); //sets the COMs for the nodes
+    
+    cudaMalloc(&d_nodes, maxNodes * sizeof(quadNode)); //allocates memory for maximum amt of nodes, meaning we can reuse it and save on malloc overhead
+    cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(quadNode), cudaMemcpyHostToDevice); //copies filled node tree to GPU
+    calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes); //assign initial acceleration to bodies
+
+    //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
 
     sf::RenderWindow window(sf::VideoMode({2560, 1440}), "nbody sim");
     window.setFramerateLimit(60);
@@ -349,7 +379,7 @@ int main() {
         }
         cudaEventRecord(t0); //record starting time
 
-        leapfrog(d_bodies, N, numBlocks, threadsPerBlock); //increment position each frame
+        leapfrog(d_bodies, bodies, d_nodes, nodes, nodeCount, numBlocks, threadsPerBlock);
 
         cudaEventRecord(t1); //record ending time
         cudaEventSynchronize(t1);
@@ -373,18 +403,11 @@ int main() {
             points[i].color = sf::Color::White;
         }
         window.draw(points);
-
-        /*
-        //draw and update trails
-        updateTrail(earthT, bodies[1], 1250); //The variables "earth" and "sun" don't change after being pushed back so we use the versions being updated in bodies.
-        updateTrail(sunT, bodies[0], 1250);
-        drawTrail(window, earthT, sf::Color::Blue, Scale);
-        drawTrail(window, sunT, sf::Color::Yellow, Scale); */
-
         window.display();
     }
 
     cudaFree(d_bodies);
+    cudaFree(d_nodes);
     cudaEventDestroy(t0);
     cudaEventDestroy(t1);
     return 0;
