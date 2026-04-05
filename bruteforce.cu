@@ -8,15 +8,16 @@
 //cd "C:\Users\aryan\OneDrive\Documents\nBody"
 
 //Set
-__constant__ float G_device = 6.67430e-11;
-const float G_host = 6.67430e-11;
+__constant__ float G_device = 3.964e-14f;
+const float G_host = 3.964e-14f;
 const float Pi = 3.14159265358979323846;
 
 //Alterable
+const int N = 250000;
 __constant__ float dt = 10; //time progressed per frame in seconds
-__constant__ float epsilon_device = 6.96e8; // softing
-const float maxRadius = 3 * 1.496e11; //3 AU
-const float Scale = 600.0/maxRadius; //screen width some margins divided by the max radius
+__constant__ float epsilon_device = 4.65e-3f; // softing
+const float maxRadius = 6.0f; //3 AU
+const float Scale = 600.0f/maxRadius; //screen width some margins divided by the max radius
 float centerPx = 1280.0f;
 float centerPy = 720.0f;
 
@@ -65,10 +66,12 @@ __global__ void calcAccel(body* bodies, int N) {
 
         for (int i=0; i<256 && tileStartIdx + i < N; i++) { //now instead of looping through bodies we loop through the tile in SM, also making sure we skip the out of bounds bodies
             if (idx == tileStartIdx + i) continue; //skips itself
-            float r = (tile[i].pos - locPos).magnitude(); //distance between bodies
-            float AccelMag = (G_device*tile[i].mass)/(r*r);
-            Vec3 dir((tile[i].pos - locPos).uVec()); //direction from body idx to body i
-            locAcc = locAcc + dir*AccelMag; //makes accel into a vector and then accumalates it
+            Vec3 rVec = (tile[i].pos - locPos); //vector between bodies
+            float rSmoothedSquared = rVec.dot(rVec) + epsilon_device * epsilon_device; //So because we're using floats, bodies can be overlapping each other makes rVec zero, meaning we can't run magnitude due to NaN poisoning
+            float rSmoothedInverse = rsqrt(rSmoothedSquared);
+            //float AccelMag = (G_device*tile[i].mass)/(rSmoothedSquared); //I added a smoothing variable epsilon here, preventing the forces from exploding if the object gets to close to the central mass
+           // Vec3 dir(rVec * rSmoothedInverse); //direction from body idx to body i, same problem here with uVec, NaN poisoning as it also uses magnitude function in uVec. Replaced with new logic to get direction.
+            locAcc = locAcc + (rVec * rSmoothedInverse) * G_device * tile[i].mass * rSmoothedInverse * rSmoothedInverse; //makes accel into a Vec3 and then accumalates it
         }
     }
     bodies[idx].acc = locAcc;
@@ -101,15 +104,15 @@ std::vector<body> initRandBodies(int N) {
 
     std::mt19937 rng(23); //set seed for replicable results
     std::uniform_real_distribution<float> angleRange(0, 2 * Pi);
-    std::uniform_real_distribution<float> radiusRange(1e9f, maxRadius); //added minimum spawn radius
+    std::uniform_real_distribution<float> radiusRange(0.5f, maxRadius); //added minimum spawn radius
 
     body centralBody; //pos and vel is 0 by default
-    centralBody.mass = 1e38; //very big black hole
+    centralBody.mass = 1e8f; //very big black hole
     bodies.push_back(centralBody);
 
-    for (int i=0; i<N; i++) {
+    for (int i=0; i<N-1; i++) {
         body temp;
-        temp.mass = 1.989e30; //set mass for all bodies to the same mass, earth, for now because otherwise initial velocity would be difficult to do
+        temp.mass = 1.0f; //set mass for all bodies to the same mass, earth, for now because otherwise initial velocity would be difficult to do
         float ang = angleRange(rng); //randomizing through polar and then converting to cartesian
         float r = radiusRange(rng);
         temp.pos = Vec3(r*cos(ang), r*sin(ang), 0); //initialize a random position
@@ -122,9 +125,8 @@ std::vector<body> initRandBodies(int N) {
 
 int main() {
     //generate N random bodies
-    std::vector<body> bodies = initRandBodies(1000000);
+    std::vector<body> bodies = initRandBodies(N);
     //GPU prep
-    int N = bodies.size();
     int threadsPerBlock = 256;
     int numBlocks = (N+threadsPerBlock-1)/threadsPerBlock;
     
@@ -147,6 +149,7 @@ int main() {
     cudaEventCreate(&t0);
     cudaEventCreate(&t1);
     int frameCount = 0;
+    float frameTimes[10];
 
     while (window.isOpen()) {
         while (const std::optional event = window.pollEvent()) {
@@ -163,10 +166,19 @@ int main() {
         float ms;
         cudaEventElapsedTime(&ms, t0, t1); //saves elapsed time to ms
 
-        frameCount++;
-        if (frameCount % 10 == 0) { //prints ms per frame every x frames to avoid console clog
-            printf("N=%d  %.2f ms/frame\n", N, ms);
+        if (frameCount >= 10 && frameCount < 20) {
+            frameTimes[frameCount - 10] = ms;
         }
+
+        if (frameCount == 20) {
+            float total = 0;
+            for (int i = 0; i < 10; i++) {
+                total += frameTimes[i];
+            }
+            printf("Average: %.2f ms/frame\n", total / 10.0f);
+        }
+
+        frameCount++;
 
         cudaDeviceSynchronize(); //finish updating bodies positions before copying back to CPU
         cudaMemcpy(bodies.data(), d_bodies, N * sizeof(body), cudaMemcpyDeviceToHost); //copy data back to CPU for drawing (cpu bottleneck), fix with OpenGL vbo later

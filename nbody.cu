@@ -7,7 +7,7 @@
 #include <random>
 
 //10k - Done
-//Barnes-Hut
+//Barnes-Hut - Done
 //3D
 //Collisions
 //compile gui engine into a dll and use python UI side, goal is to seperating the gui side and the calculation side between python and cpp
@@ -15,42 +15,42 @@
 //use Pybind11, library to expose cpp functions to python, connecting c++ with python
 //import nbody_engine
 
-//Set
-__constant__ double G_device = 6.67430e-11;
+//Everything is an astronomical units or otherwise larger units as floats can only handle a max of about 3.4028235 × 10^38
 
-const double G_host = 6.67430e-11;
-const double Pi = 3.14159265358979323846;
+//Set
+__constant__ float G_device = 3.964e-14f; //G is not 6.67430e-11 as we're not using SI units
+
+const float G_host = 3.964e-14f; // AU³ / (M_sun * s²)
+const float Pi = 3.14159265358979323846f;
 
 //Alterable
-const int N = 100000; //number of bodies
+const int N = 250000; //number of bodies
+//Do 2pir / v for the bodies to make sure the time step is good enough compared to the central mass
+__constant__ float dt = 10; //time progressed per frame in seconds
+__constant__ float epsilon_device = 4.65e-3f; //sun radius in AU
+__constant__ float theta_device = 0.5f;
 
-__constant__ double dt = 10; //time progressed per frame in seconds
-__constant__ double epsilon_device = 6.96e8; //sun radius in meters
-__constant__ double theta_device = 0.5;
-
-const double epsilon_host = 6.96e8;
-const double theta_host = 0.5;
 const int maxDepth = 21; //ensures we don't have a stack overflow in the gpu
 const int maxNodes = N*8; //worst case node usage, each body insertion creates at most 4 bodies, and then there's some padding.
-const double maxRadius = 15 * 1.496e11; //first number AU
-const double Scale = 600.0/maxRadius; //screen width some margins divided by the max radius
+const float maxRadius = 6.0f;
+const float Scale = 600.0f/maxRadius; //screen width some margins divided by the max radius
 float centerPx = 1280.0f;
 float centerPy = 720.0f;
 
 struct Vec3 {
-    double x, y, z;
+    float x, y, z;
 
-    __host__ __device__ Vec3(double x = 0, double y = 0, double z = 0) : x(x), y(y), z(z) {}
+    __host__ __device__ Vec3(float x = 0, float y = 0, float z = 0) : x(x), y(y), z(z) {}
 
     __host__ __device__ Vec3 operator+(const Vec3& o) const { return {x+o.x, y+o.y, z+o.z}; }
     __host__ __device__ Vec3 operator-(const Vec3& o) const { return {x-o.x, y-o.y, z-o.z}; }
-    __host__ __device__ Vec3 operator*(double s)      const { return {x*s,   y*s,   z*s};   }
+    __host__ __device__ Vec3 operator*(float s)      const { return {x*s,   y*s,   z*s};   }
 
-    __host__ __device__ double magnitude() const { return sqrt(x*x + y*y + z*z); }
-    __host__ __device__ double dot(const Vec3& o) const { return x*o.x + y*o.y + z*o.z; }
+    __host__ __device__ float magnitude() const { return sqrt(x*x + y*y + z*z); }
+    __host__ __device__ float dot(const Vec3& o) const { return x*o.x + y*o.y + z*o.z; }
 
     __host__ __device__ Vec3 uVec() const {
-        double mag = magnitude();
+        float mag = magnitude();
         return {x/mag, y/mag, z/mag};
     }
 };
@@ -59,13 +59,13 @@ struct body {
     Vec3 pos;
     Vec3 vel;
     Vec3 acc;
-    double mass;
+    float mass;
 };
 
 struct quadNode {
     Vec3 centerOfMass;
     Vec3 centerPos;
-    double totalMass, size; 
+    float totalMass, size; 
     int children[4], bodyIdx;
 };
 
@@ -79,10 +79,10 @@ void resetNode(quadNode& node) {
 }
 
 quadNode getRootNode(const std::vector<body>& bodies) {
-    double xMin = bodies[0].pos.x;
-    double xMax = bodies[0].pos.x;
-    double yMin = bodies[0].pos.y;
-    double yMax = bodies[0].pos.y;
+    float xMin = bodies[0].pos.x;
+    float xMax = bodies[0].pos.x;
+    float yMin = bodies[0].pos.y;
+    float yMax = bodies[0].pos.y;
 
     for (int i=0; i<bodies.size(); i++) {
         xMin = std::min(xMin, bodies[i].pos.x);
@@ -106,7 +106,7 @@ int getQuadrant(const body& b, const quadNode& node) {
 void calcChildCenterPos (const quadNode& parent, const int& quadrant, Vec3& childCenterPos) {
     int xBit = quadrant & 1; //extract bits, the & operator only keeps the int n bits from the left
     int yBit = (quadrant >> 1) & 1;
-    double shift = parent.size /4.0; //shift is 1/4 of parent node width
+    float shift = parent.size /4.0; //shift is 1/4 of parent node width
 
     //2*bit - 1, will turn the 0 or 1 into -1 or 1 nicely to apply shift
     childCenterPos.x = parent.centerPos.x + (2 * xBit - 1) * shift;
@@ -192,7 +192,7 @@ void computeCOM(std::vector<quadNode>& nodes, int nodeIdx) { //nodeIdx is just r
     }
 
     //Case 3, internal node
-    double totalMass = 0.0;
+    float totalMass = 0.0;
     Vec3 weightedMass;
     for (int i=0; i<4; i++) { //go through each child
         if (currNode.children[i] != -1) { //will cause error trying to acces nodes[-1] if the child doesn't exist because sparse trees don't initialize empty nodes
@@ -229,10 +229,12 @@ __global__ void calcAccel(body* bodies, quadNode* nodes) {
         if (currNode.bodyIdx != -1 || (currNode.size / (currNode.centerOfMass - locPos).magnitude()) <= theta_device) {
             if (currNode.bodyIdx == idx) continue; //the body skips itself
 
-            double r = (currNode.centerOfMass - locPos).magnitude(); //distance between bodies
-            double AccelMag = (G_device*currNode.totalMass)/(r*r + epsilon_device * epsilon_device); //I added a smoothing variable epsilon here, preventing the forces from exploding if the object gets to close to the central mass
-            Vec3 dir((currNode.centerOfMass - locPos).uVec()); //direction from body idx to body i
-            locAcc = locAcc + dir*AccelMag; //makes accel into a Vec3 and then accumalates it
+            Vec3 rVec = (currNode.centerOfMass - locPos); //vector between bodies
+            float rSmoothedSquared = rVec.dot(rVec) + epsilon_device * epsilon_device; //So because we're using floats, bodies can be overlapping each other makes rVec zero, meaning we can't run magnitude due to NaN poisoning
+            float rSmoothedInverse = rsqrt(rSmoothedSquared);
+            //float AccelMag = (G_device*currNode.totalMass)/(rSmoothedSquared); //I added a smoothing variable epsilon here, preventing the forces from exploding if the object gets to close to the central mass
+            //Vec3 dir(rVec * rSmoothedInverse); //direction from body idx to body i, same problem here with uVec, NaN poisoning as it also uses magnitude function in uVec. Replaced with new logic to get direction.
+            locAcc = locAcc + (rVec * rSmoothedInverse) * G_device * currNode.totalMass * rSmoothedInverse * rSmoothedInverse; //makes accel into a Vec3 and then accumalates it
 
             continue;
         }
@@ -269,8 +271,8 @@ __global__ void calcAccelOld(body* bodies, int N) {
 
         for (int i=0; i<256 && tileStartIdx + i < N; i++) { //now instead of looping through bodies we loop through the tile in SM, also making sure we skip the out of bounds bodies
             if (idx == tileStartIdx + i) continue; //skips itself
-            double r = (tile[i].pos - locPos).magnitude(); //distance between bodies
-            double AccelMag = (G_device*tile[i].mass)/(r*r + epsilon_device * epsilon_device); //I added a smoothing variable epsilon here, preventing the forces from exploding if the object gets to close to the central mass
+            float r = (tile[i].pos - locPos).magnitude(); //distance between bodies
+            float AccelMag = (G_device*tile[i].mass)/(r*r + epsilon_device * epsilon_device); //I added a smoothing variable epsilon here, preventing the forces from exploding if the object gets to close to the central mass
             Vec3 dir((tile[i].pos - locPos).uVec()); //direction from body idx to body i
             locAcc = locAcc + dir*AccelMag; //makes accel into a vector and then accumalates it
         }
@@ -315,20 +317,20 @@ std::vector<body> initRandBodies(int N) {
     std::vector<body> bodies;
 
     std::mt19937 rng(23); //set seed for replicable results
-    std::uniform_real_distribution<double> angleRange(0, 2 * Pi);
-    std::uniform_real_distribution<double> radiusRange(1e6, maxRadius); //Everything spawns at least 1000 km away from the central mass
+    std::uniform_real_distribution<float> angleRange(0, 2 * Pi);
+    std::uniform_real_distribution<float> radiusRange(0.5f, maxRadius); //Everything spawns at half an AU away from the central mass at a minimum
 
     body centralBody; //pos and vel is 0 by default
-    centralBody.mass = 1e38; //very big black hole
+    centralBody.mass = 1e8f; //very big black hole
     bodies.push_back(centralBody);
 
     for (int i=0; i<N-1; i++) { //our memcpy and malloc function copy exactly N, and with the central body we have N+1 bodies, so we just randomize N-1 bodies.
         body temp;
-        temp.mass = 1.989e30; //set mass for all bodies to the same mass, the sun, for now because otherwise initial velocity would be difficult to do
-        double ang = angleRange(rng); //randomizing through polar and then converting to cartesian
-        double r = radiusRange(rng);
+        temp.mass = 1.0f; //set mass for all bodies to the same mass, the sun, for now because otherwise initial velocity would be difficult to do
+        float ang = angleRange(rng); //randomizing through polar and then converting to cartesian
+        float r = radiusRange(rng);
         temp.pos = Vec3(r*cos(ang), r*sin(ang), 0); //initialize a random position
-        double vel = sqrt(G_host * centralBody.mass/r);
+        float vel = sqrt(G_host * centralBody.mass/r);
         temp.vel = Vec3(vel * (-temp.pos.y/r), vel * (temp.pos.x/r), 0); //Finds the unit vector perpendicular to the radius and scales it to velocity
         bodies.push_back(temp);
     }
@@ -370,6 +372,7 @@ int main() {
     cudaEventCreate(&t0);
     cudaEventCreate(&t1);
     int frameCount = 0;
+    float frameTimes[10];
 
     while (window.isOpen()) {
         while (const std::optional event = window.pollEvent()) {
@@ -386,10 +389,19 @@ int main() {
         float ms;
         cudaEventElapsedTime(&ms, t0, t1); //saves elapsed time to ms
 
-        frameCount++;
-        if (frameCount % 10 == 0) { //prints ms per frame every x frames to avoid console clog
-            printf("N=%d  %.2f ms/frame\n", N, ms);
+        if (frameCount >= 10 && frameCount < 20) {
+            frameTimes[frameCount - 10] = ms;
         }
+
+        if (frameCount == 20) {
+            float total = 0;
+            for (int i = 0; i < 10; i++) {
+                total += frameTimes[i];
+            }
+            printf("Average: %.2f ms/frame\n", total / 10.0f);
+        }
+
+        frameCount++;
 
         cudaDeviceSynchronize(); //finish updating bodies positions before copying back to CPU
         cudaMemcpy(bodies.data(), d_bodies, N * sizeof(body), cudaMemcpyDeviceToHost); //copy data back to CPU for drawing (cpu bottleneck), fix with OpenGL vbo later
