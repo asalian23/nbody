@@ -156,19 +156,28 @@ Rather than SI units, astronomical units are used to keep values within the rang
 
 Tested on an RTX 4090. Each measurement is the average of 10 frames after a 10-frame warmup.
 
+markdown
 | N (bodies) | Barnes-Hut (ms/frame) | Brute Force (ms/frame) | Speedup |
 |------------|----------------------|----------------------|---------|
 | 1,000 | 0.73 | 0.18 | 0.25× |
 | 10,000 | 3.17 | 0.91 | 0.29× |
+| 25,000 | 7.01 | 2.06 | 0.29× |
 | 50,000 | 14.05 | 4.41 | 0.31× |
+| 75,000 | 22.89 | 9.14 | 0.40× |
 | 100,000 | 31.62 | 15.45 | 0.49× |
 | 200,000 | 75.23 | 54.61 | 0.73× |
 | 300,000 | 120.03 | 115.87 | 0.97× |
+| 350,000 | 150.49 | 151.81 | 1.01× |
+| 400,000 | 177.24 | 201.96 | 1.14× |
 | 500,000 | 226.91 | 303.34 | 1.34× |
+| 600,000 | 287.03 | 438.60 | 1.53× |
 | 700,000 | 359.29 | 585.75 | 1.63× |
+| 800,000 | 425.24 | 743.26 | 1.75× |
+| 900,000 | 496.75 | 963.94 | 1.94× |
 | 1,000,000 | 563.02 | 1,184.79 | 2.10× |
 
 Barnes-Hut outpaces brute force at about 350K bodies. The experimental crossover point is higher than the theoretical due to the overhead added from CPU-side tree building and memory transfers.
+
 
 ![Benchmark Chart](images/benchmark.png)
 
