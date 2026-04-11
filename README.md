@@ -12,7 +12,7 @@
 <h3 align="center">CUDA N-Body Simulation</h3>
 
   <p align="center">
-    A GPU programmed gravitational N-body simulation displaying 1M bodies in real time, featuring both brute force O(N²) and Barnes-Hut O(N log N) algorithms.
+    A GPU-programmed gravitational N-body simulation displaying 1M bodies in real time, featuring both brute force O(N²) and Barnes-Hut O(N log N) algorithms.
     <br />
     <br />
     <a href="https://github.com/asalian23/nbody">View Demo</a>
