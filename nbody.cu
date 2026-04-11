@@ -24,7 +24,7 @@ const float G_host = 3.964e-14f; // AU³ / (M_sun * s²)
 const float Pi = 3.14159265358979323846f;
 
 //Alterable
-const int N = 1000000; //number of bodies
+const int N = 100000; //number of bodies
 //Do 2pir / v for the bodies to make sure the time step is good enough compared to the central mass
 __constant__ float dt = 10; //time progressed per frame in seconds
 __constant__ float epsilon_device = 4.65e-3f; //sun radius in AU
@@ -62,64 +62,69 @@ struct body {
     float mass;
 };
 
-struct quadNode {
+struct octNode {
     Vec3 centerOfMass;
     Vec3 centerPos;
     float totalMass, size; 
-    int children[4], bodyIdx;
+    int children[8], bodyIdx;
 };
 
-void resetNode(quadNode& node) {
+void resetNode(octNode& node) {
     node.centerOfMass = Vec3();
     node.centerPos = Vec3();
     node.totalMass = 0;
     node.size = 0;
     node.bodyIdx = -1;
-    for (int i=0; i<4; i++) node.children[i] = -1;
+    for (int i=0; i<8; i++) node.children[i] = -1;
 }
 
-quadNode getRootNode(const std::vector<body>& bodies) {
+octNode getRootNode(const std::vector<body>& bodies) {
     float xMin = bodies[0].pos.x;
     float xMax = bodies[0].pos.x;
     float yMin = bodies[0].pos.y;
     float yMax = bodies[0].pos.y;
+    float zMin = bodies[0].pos.z;
+    float zMax = bodies[0].pos.z;
 
     for (int i=0; i<bodies.size(); i++) {
         xMin = std::min(xMin, bodies[i].pos.x);
         xMax = std::max(xMax, bodies[i].pos.x);
         yMin = std::min(yMin, bodies[i].pos.y);
         yMax = std::max(yMax, bodies[i].pos.y);
+        zMin = std::min(zMin, bodies[i].pos.z);
+        zMax = std::max(zMax, bodies[i].pos.z);
     }
 
-    quadNode root;
+    octNode root;
     resetNode(root);
-    root.size = std::max(xMax-xMin, yMax-yMin) * 1.01; //Multiplying by 1.01 handles rare edge cases
-    root.centerPos = Vec3((xMin + xMax)/2.0, (yMin + yMax)/2.0, 0);
+    root.size = std::max({xMax-xMin, yMax-yMin, zMax-zMin}) * 1.01; //Multiplying by 1.01 handles rare edge cases
+    root.centerPos = Vec3((xMin + xMax)/2.0, (yMin + yMax)/2.0, (zMin + zMax)/2.0);
     
     return root;
 }
 
-int getQuadrant(const body& b, const quadNode& node) {
-    return (b.pos.x >= node.centerPos.x) | ((b.pos.y >= node.centerPos.y) << 1); //using bitwise to avoid branching
+int getOctant(const body& b, const octNode& node) {
+    return (b.pos.x >= node.centerPos.x) | ((b.pos.y >= node.centerPos.y) << 1) | ((b.pos.z >= node.centerPos.z) << 2); //using bitwise to avoid branching
 }
 
-void calcChildCenterPos (const quadNode& parent, const int& quadrant, Vec3& childCenterPos) {
-    int xBit = quadrant & 1; //extract bits, the & operator only keeps the int n bits from the left
-    int yBit = (quadrant >> 1) & 1;
+void calcChildCenterPos (const octNode& parent, const int& octant, Vec3& childCenterPos) {
+    int xBit = octant & 1; //extract bits, the & operator only keeps the int n bits from the left
+    int yBit = (octant >> 1) & 1;
+    int zBit = (octant >> 2) & 1;
     float shift = parent.size /4.0; //shift is 1/4 of parent node width
 
     //2*bit - 1, will turn the 0 or 1 into -1 or 1 nicely to apply shift
     childCenterPos.x = parent.centerPos.x + (2 * xBit - 1) * shift;
     childCenterPos.y = parent.centerPos.y + (2 * yBit - 1) * shift;
-    childCenterPos.z = parent.centerPos.z;
+    childCenterPos.z = parent.centerPos.z + (2 * zBit - 1) * shift;
 }
 
 //The next function also builds the tree. Note - This is a sparse tree, so watch out for nonexistent nodes when recursing
-void insertBody(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& nodeCount, int bodyIdx, int nodeIdx, int currDepth) { //This function must be seperate as it recurses into itself
+void insertBody(std::vector<body>& bodies, std::vector<octNode>& nodes, int& nodeCount, int bodyIdx, int nodeIdx, int currDepth) { //This function must be seperate as it recurses into itself
     const body& currBody = bodies[bodyIdx];
-    quadNode& currNode = nodes[nodeIdx];
+    octNode& currNode = nodes[nodeIdx];
 
-    bool hasChildren = (currNode.children[0] != -1 || currNode.children[1] != -1 || currNode.children[2] != -1 || currNode.children[3] != -1);
+    bool hasChildren = (currNode.children[0] != -1 || currNode.children[1] != -1 || currNode.children[2] != -1 || currNode.children[3] != -1 || currNode.children[4] != -1 || currNode.children[5] != -1 || currNode.children[6] != -1 || currNode.children[7] != -1);
 
     //First case, empty node
     if (currNode.bodyIdx == -1 && !hasChildren) { //If a node has no body in it and no children it is an empty node
@@ -135,15 +140,15 @@ void insertBody(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& no
         
         //the previously leaf node, now parent node, still needs its bodyIdx reset. Note that it will have an incorrect mass and com value, but those will be set properly through the bottom up pass later
         int prevBodyIdx = currNode.bodyIdx;
-        int prevBodyQuadrant = getQuadrant(bodies[prevBodyIdx], currNode); //prev body quadrant used to init the space for the prev body
+        int prevBodyOctant = getOctant(bodies[prevBodyIdx], currNode); //prev body octant used to init the space for the prev body
         currNode.bodyIdx = -1;
         
         //The following logic is to readd the previous body to the appropriate child node
-        quadNode& currChildNode = nodes[nodeCount]; //sets the childnodes location to next avaliable spot in nodes array
-        currNode.children[prevBodyQuadrant] = nodeCount; //idx of child node is next avaliable nodeIdx
+        octNode& currChildNode = nodes[nodeCount]; //sets the childnodes location to next avaliable spot in nodes array
+        currNode.children[prevBodyOctant] = nodeCount; //idx of child node is next avaliable nodeIdx
         resetNode(currChildNode); //init child node
         currChildNode.size = currNode.size / 2.0; //sets child size
-        calcChildCenterPos(currNode, prevBodyQuadrant, currChildNode.centerPos); //sets child center
+        calcChildCenterPos(currNode, prevBodyOctant, currChildNode.centerPos); //sets child center
         nodeCount++;
 
         //For the following insertion we are still passing the parent's nodeIdx to let case 3 handle recursing into the child nodes, and as such we do not increment the depth
@@ -152,20 +157,20 @@ void insertBody(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& no
     }
 
     //Third Case, internal node
-    int quadrant = getQuadrant(currBody, currNode);
+    int octant = getOctant(currBody, currNode);
 
-    if (currNode.children[quadrant] == -1) {
-        quadNode& currChildNode = nodes[nodeCount]; //sets the childnodes location to next avaliable spot in nodes array
-        currNode.children[quadrant] = nodeCount; //idx of child node is next avaliable nodeIdx
+    if (currNode.children[octant] == -1) {
+        octNode& currChildNode = nodes[nodeCount]; //sets the childnodes location to next avaliable spot in nodes array
+        currNode.children[octant] = nodeCount; //idx of child node is next avaliable nodeIdx
         resetNode(currChildNode); //init child node
         currChildNode.size = currNode.size / 2.0; //sets child size
-        calcChildCenterPos(currNode, quadrant, currChildNode.centerPos); //sets child center
+        calcChildCenterPos(currNode, octant, currChildNode.centerPos); //sets child center
         nodeCount++;
     }
-    insertBody(bodies, nodes, nodeCount, bodyIdx, currNode.children[quadrant], currDepth+1);
+    insertBody(bodies, nodes, nodeCount, bodyIdx, currNode.children[octant], currDepth+1);
 }
 
-void fillTree(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& nodeCount) { //loops through bodies and inserts each one
+void fillTree(std::vector<body>& bodies, std::vector<octNode>& nodes, int& nodeCount) { //loops through bodies and inserts each one
     for (int i=0; i<nodeCount; i++) resetNode(nodes[i]); //resets the old nodes
 
     nodeCount = 1; //the root node, nodeCount represents both the number of node's allocated and the next avalaible nodeIdx
@@ -176,10 +181,10 @@ void fillTree(std::vector<body>& bodies, std::vector<quadNode>& nodes, int& node
     }
 }
 
-void computeCOM(std::vector<quadNode>& nodes, int nodeIdx) { //nodeIdx is just read not changed so we don't pass by reference
-    quadNode& currNode = nodes[nodeIdx];
+void computeCOM(std::vector<octNode>& nodes, int nodeIdx) { //nodeIdx is just read not changed so we don't pass by reference
+    octNode& currNode = nodes[nodeIdx];
 
-    bool hasChildren = (currNode.children[0] != -1 || currNode.children[1] != -1 || currNode.children[2] != -1 || currNode.children[3] != -1);
+    bool hasChildren = (currNode.children[0] != -1 || currNode.children[1] != -1 || currNode.children[2] != -1 || currNode.children[3] != -1 || currNode.children[4] != -1 || currNode.children[5] != -1 || currNode.children[6] != -1 || currNode.children[7] != -1);
     
     //Case 1, empty node
     if (currNode.bodyIdx == -1 && !hasChildren) {
@@ -194,11 +199,11 @@ void computeCOM(std::vector<quadNode>& nodes, int nodeIdx) { //nodeIdx is just r
     //Case 3, internal node
     float totalMass = 0.0;
     Vec3 weightedMass;
-    for (int i=0; i<4; i++) { //go through each child
+    for (int i=0; i<8; i++) { //go through each child
         if (currNode.children[i] != -1) { //will cause error trying to acces nodes[-1] if the child doesn't exist because sparse trees don't initialize empty nodes
             computeCOM(nodes, currNode.children[i]); //recurse down to compute com for each child, and then those recurse and so on, making this a bottom up search
             
-            quadNode& currChild = nodes[currNode.children[i]];
+            octNode& currChild = nodes[currNode.children[i]];
             totalMass += currChild.totalMass;
             weightedMass = weightedMass + currChild.centerOfMass * currChild.totalMass; 
         }
@@ -209,18 +214,18 @@ void computeCOM(std::vector<quadNode>& nodes, int nodeIdx) { //nodeIdx is just r
     return;
 }
 
-__global__ void calcAccel(body* bodies, quadNode* nodes) {
+__global__ void calcAccel(body* bodies, octNode* nodes) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x; //global index
     if (idx >= N) return; //bounds check
     Vec3 locAcc(0, 0, 0); //local var to accumalte acceleration
     Vec3 locPos = bodies[idx].pos; //local position to avoid global reads
-    int stack[64]; //A max stack size of 64 allows for (maxDepth * 3) + 1 <= 64, so 21 splits, meaning our minimum node size is 430 km
+    int stack[148]; //A max stack size of 128 allows for (maxDepth * 7) + 1 <= 148, so 21 splits, meaning our minimum node size is 430 km (not sure on the exact num actually)
     int stackTop = 1; //variable to manage iterating through the stack
     stack[0] = 0; //setting the first item in stack to the idx of the root node
 
     while (stackTop > 0) {
         stackTop--;
-        quadNode& currNode = nodes[stack[stackTop]];
+        octNode& currNode = nodes[stack[stackTop]];
         
         //Case 1, empty nodes
         if (currNode.totalMass == 0) continue; //Skipping empty nodes
@@ -240,7 +245,7 @@ __global__ void calcAccel(body* bodies, quadNode* nodes) {
         }
 
         //Case 3, internal nodes that do not satisfy theta
-        for (int i=0; i<4; i++) {
+        for (int i=0; i<8; i++) {
             if (currNode.children[i] != -1) {
                 stack[stackTop++] = currNode.children[i];
             }
@@ -297,7 +302,7 @@ __global__ void leapfrogPartTwo(body* bodies, int N) {
     bodies[idx].vel = bodies[idx].vel + bodies[idx].acc * 0.5 * dt; //Applies kick 2
 }
 
-void leapfrog(body* d_bodies, std::vector<body>& bodies, quadNode* d_nodes, std::vector<quadNode>& nodes, int& nodeCount, int numBlocks, int threadsPerBlock) {
+void leapfrog(body* d_bodies, std::vector<body>& bodies, octNode* d_nodes, std::vector<octNode>& nodes, int& nodeCount, int numBlocks, int threadsPerBlock) {
     //Kick 1 + Drift and bring updated bodis back to cpu
         leapfrogPartOne<<<numBlocks, threadsPerBlock>>>(d_bodies, N);
         cudaDeviceSynchronize();
@@ -306,7 +311,7 @@ void leapfrog(body* d_bodies, std::vector<body>& bodies, quadNode* d_nodes, std:
         //Now logic to recalculate acceleration
         fillTree(bodies, nodes, nodeCount); //nodeCount's value right now is the nodes used in the previous tree, we pass that so fillTree knows how many nodes to reset.
         computeCOM(nodes, 0); //Always need to set the coms and masses after building the tree
-        cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(quadNode), cudaMemcpyHostToDevice); //Here nodeCount represents the nodes used to build the current tree, so we only need to copy that amount of nodes over
+        cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(octNode), cudaMemcpyHostToDevice); //Here nodeCount represents the nodes used to build the current tree, so we only need to copy that amount of nodes over
         calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes); //now we actually run the function to calculate the new accelerations
 
         //Kick 2
@@ -319,6 +324,7 @@ std::vector<body> initRandBodies(int N) {
     std::mt19937 rng(23); //set seed for replicable results
     std::uniform_real_distribution<float> angleRange(0, 2 * Pi);
     std::uniform_real_distribution<float> radiusRange(0.5f, maxRadius); //Everything spawns at half an AU away from the central mass at a minimum
+    std::uniform_real_distribution<float> zRange(-1.0f, 1.0f); //this is set for a flatish galaxy type simulation, if I want to do a sphere I need to add phi
 
     body centralBody; //pos and vel is 0 by default
     centralBody.mass = 1e8f; //very big black hole
@@ -329,7 +335,8 @@ std::vector<body> initRandBodies(int N) {
         temp.mass = 1.0f; //set mass for all bodies to the same mass, the sun, for now because otherwise initial velocity would be difficult to do
         float ang = angleRange(rng); //randomizing through polar and then converting to cartesian
         float r = radiusRange(rng);
-        temp.pos = Vec3(r*cos(ang), r*sin(ang), 0); //initialize a random position
+        float z = zRange(rng);
+        temp.pos = Vec3(r*cos(ang), r*sin(ang), z); //initialize a random position
         float vel = sqrt(G_host * centralBody.mass/r);
         temp.vel = Vec3(vel * (-temp.pos.y/r), vel * (temp.pos.x/r), 0); //Finds the unit vector perpendicular to the radius and scales it to velocity
         bodies.push_back(temp);
@@ -341,7 +348,7 @@ int main() {
     //generate N random bodies
     std::vector<body> bodies = initRandBodies(N);
     //Init nodes vector
-    std::vector<quadNode> nodes(maxNodes);
+    std::vector<octNode> nodes(maxNodes);
     //GPU prep
     int threadsPerBlock = 256;
     int numBlocks = (N+threadsPerBlock-1)/threadsPerBlock;
@@ -353,13 +360,13 @@ int main() {
     cudaMemcpy(d_bodies, bodies.data(), N*sizeof(body), cudaMemcpyHostToDevice); //Copies vector to GPU
 
     //Nodes Prep
-    quadNode* d_nodes;
+    octNode* d_nodes;
     int nodeCount = 0; //We create nodeCount outside fillTree so we only allocate space for the neccesary amount of nodes rather than the max each time. Its also set to 0 so the resetNodes loop works without error in the first treebuild.
     fillTree(bodies, nodes, nodeCount); //Fills the node tree with bodies
     computeCOM(nodes, 0); //sets the COMs for the nodes
     
-    cudaMalloc(&d_nodes, maxNodes * sizeof(quadNode)); //allocates memory for maximum amt of nodes, meaning we can reuse it and save on malloc overhead
-    cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(quadNode), cudaMemcpyHostToDevice); //copies filled node tree to GPU
+    cudaMalloc(&d_nodes, maxNodes * sizeof(octNode)); //allocates memory for maximum amt of nodes, meaning we can reuse it and save on malloc overhead
+    cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(octNode), cudaMemcpyHostToDevice); //copies filled node tree to GPU
     calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes); //assign initial acceleration to bodies
 
     //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
@@ -412,7 +419,8 @@ int main() {
             float px = centerPx + bodies[i].pos.x * Scale;
             float py = centerPy + bodies[i].pos.y * Scale;
             points[i].position = {px, py};
-            points[i].color = sf::Color::White;
+            int depthEffect = std::max(50, std::min(255, (int)(150 + bodies[i].pos.z * 100))); //changes color based on depth
+            points[i].color = sf::Color(depthEffect, depthEffect, 255);
         }
         window.draw(points);
         window.display();
