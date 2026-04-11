@@ -24,7 +24,7 @@ const float G_host = 3.964e-14f; // AU³ / (M_sun * s²)
 const float Pi = 3.14159265358979323846f;
 
 //Alterable
-const int N = 250000; //number of bodies
+const int N = 1000000; //number of bodies
 //Do 2pir / v for the bodies to make sure the time step is good enough compared to the central mass
 __constant__ float dt = 10; //time progressed per frame in seconds
 __constant__ float epsilon_device = 4.65e-3f; //sun radius in AU
