@@ -24,14 +24,14 @@ const float G_host = 3.964e-14f; // AU³ / (M_sun * s²)
 const float Pi = 3.14159265358979323846f;
 
 //Alterable
-const int N = 100000; //number of bodies
+const int N = 150000; //number of bodies
 //Do 2pir / v for the bodies to make sure the time step is good enough compared to the central mass
 __constant__ float dt = 10; //time progressed per frame in seconds
 __constant__ float epsilon_device = 4.65e-3f; //sun radius in AU
 __constant__ float theta_device = 0.5f;
 
 const int maxDepth = 21; //ensures we don't have a stack overflow in the gpu
-const int maxNodes = N*8; //worst case node usage, each body insertion creates at most 4 bodies, and then there's some padding.
+const int maxNodes = N*3; //worst case node usage, as its a sparse octree, each body can create a new node, then at worse each layer up contains half the nodes of the layer below, never exceed 2N, and then N was added for padding.
 const float maxRadius = 6.0f;
 const float Scale = 600.0f/maxRadius; //screen width some margins divided by the max radius
 float centerPx = 1280.0f;
@@ -303,7 +303,7 @@ __global__ void leapfrogPartTwo(body* bodies, int N) {
 }
 
 void leapfrog(body* d_bodies, std::vector<body>& bodies, octNode* d_nodes, std::vector<octNode>& nodes, int& nodeCount, int numBlocks, int threadsPerBlock) {
-    //Kick 1 + Drift and bring updated bodis back to cpu
+    //Kick 1 + Drift and bring updated bodies back to cpu
         leapfrogPartOne<<<numBlocks, threadsPerBlock>>>(d_bodies, N);
         cudaDeviceSynchronize();
         cudaMemcpy(bodies.data(), d_bodies, N*sizeof(body), cudaMemcpyDeviceToHost);
@@ -324,7 +324,7 @@ std::vector<body> initRandBodies(int N) {
     std::mt19937 rng(23); //set seed for replicable results
     std::uniform_real_distribution<float> angleRange(0, 2 * Pi);
     std::uniform_real_distribution<float> radiusRange(0.5f, maxRadius); //Everything spawns at half an AU away from the central mass at a minimum
-    std::uniform_real_distribution<float> zRange(-1.0f, 1.0f); //this is set for a flatish galaxy type simulation, if I want to do a sphere I need to add phi
+    std::uniform_real_distribution<float> zRange(-3.0f, 3.0f); //this is set for a flatish galaxy type simulation, if I want to do a sphere I need to add phi
 
     body centralBody; //pos and vel is 0 by default
     centralBody.mass = 1e8f; //very big black hole
@@ -382,6 +382,7 @@ int main() {
     float frameTimes[10];
 
     while (window.isOpen()) {
+        //Checking for x button clicked
         while (const std::optional event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>()) {   
                 window.close();
@@ -389,7 +390,7 @@ int main() {
         }
         cudaEventRecord(t0); //record starting time
 
-        leapfrog(d_bodies, bodies, d_nodes, nodes, nodeCount, numBlocks, threadsPerBlock);
+        leapfrog(d_bodies, bodies, d_nodes, nodes, nodeCount, numBlocks, threadsPerBlock); //kick 1, calc accel, the kick 2, basically update the positions for the frame
 
         cudaEventRecord(t1); //record ending time
         cudaEventSynchronize(t1);
@@ -410,17 +411,37 @@ int main() {
 
         frameCount++;
 
-        cudaDeviceSynchronize(); //finish updating bodies positions before copying back to CPU
+        //cudaDeviceSynchronize(); Not needed as memcpy is blocking has it built in //finish updating bodies positions before copying back to CPU
         cudaMemcpy(bodies.data(), d_bodies, N * sizeof(body), cudaMemcpyDeviceToHost); //copy data back to CPU for drawing (cpu bottleneck), fix with OpenGL vbo later
         window.clear(); //clear the old frame
         
         sf::VertexArray points(sf::PrimitiveType::Points, N); //VectorArray requires one draw call per frame rather than bodies draw calls per frame in previous logic
-        for (int i=0; i<N; i++) {
-            float px = centerPx + bodies[i].pos.x * Scale;
-            float py = centerPy + bodies[i].pos.y * Scale;
+
+        //Main Render Loop
+        float camDist = 9.0f;
+        float tiltX = .6f;
+        float tiltY = 0.25f;
+        float cosX = cos(tiltX), sinX = sin(tiltX);
+        float cosY = cos(tiltY), sinY = sin(tiltY);
+
+        for (int i = 0; i < N; i++) {
+            // rotate around X axis
+            float y1 = bodies[i].pos.y * cosX - bodies[i].pos.z * sinX;
+            float z1 = bodies[i].pos.y * sinX + bodies[i].pos.z * cosX;
+            // rotate around Y axis
+            float x2 = bodies[i].pos.x * cosY + z1 * sinY;
+            float z2 = -bodies[i].pos.x * sinY + z1 * cosY;
+
+            float perspective = camDist / (camDist + z2);
+            float px = centerPx + x2 * Scale * perspective;
+            float py = centerPy + y1 * Scale * perspective;
             points[i].position = {px, py};
-            int depthEffect = std::max(50, std::min(255, (int)(150 + bodies[i].pos.z * 100))); //changes color based on depth
-            points[i].color = sf::Color(depthEffect, depthEffect, 255);
+
+            if (i == 0) {
+                points[i].color = sf::Color(255, 200, 50);
+            } else {
+                points[i].color = sf::Color(255, 255, 255);
+            }
         }
         window.draw(points);
         window.display();
