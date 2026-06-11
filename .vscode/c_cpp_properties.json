@@ -3,7 +3,9 @@
     {
       "name": "windows-gcc-x64",
       "includePath": [
-        "${workspaceFolder}/**"
+        "${workspaceFolder}/**",
+          "C:/glad/include",
+          "C:/GLFW/glfw-3.4.bin.WIN64/include"
       ],
       "compilerPath": "gcc",
       "cStandard": "${default}",

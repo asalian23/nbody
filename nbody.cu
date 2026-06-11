@@ -3,17 +3,20 @@
 #include <cmath>
 #include <deque>
 #include <cuda_runtime.h>
-#include <SFML/Graphics.hpp>
 #include <random>
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <cuda_gl_interop.h>
 
 //10k - Done
 //Barnes-Hut - Done
-//3D
+//3D - Done
 //Collisions
 //compile gui engine into a dll and use python UI side, goal is to seperating the gui side and the calculation side between python and cpp
 //Data vizualition with python using CUDA reduction kernel
 //use Pybind11, library to expose cpp functions to python, connecting c++ with python
 //import nbody_engine
+//Next project is matrix calculator
 
 //Everything is an astronomical units or otherwise larger units as floats can only handle a max of about 3.4028235 × 10^38
 
@@ -34,8 +37,8 @@ const int maxDepth = 21; //ensures we don't have a stack overflow in the gpu
 const int maxNodes = N*3; //worst case node usage, as its a sparse octree, each body can create a new node, then at worse each layer up contains half the nodes of the layer below, never exceed 2N, and then N was added for padding.
 const float maxRadius = 6.0f;
 const float Scale = 600.0f/maxRadius; //screen width some margins divided by the max radius
-float centerPx = 1280.0f;
-float centerPy = 720.0f;
+float centerPx = 1920.0f; //note that this should be adjusted by screen on the github
+float centerPy = 1080.0f;
 
 struct Vec3 {
     float x, y, z;
@@ -344,6 +347,82 @@ std::vector<body> initRandBodies(int N) {
     return bodies;
 }
 
+GLuint compileShaderProgram() {
+    const char* vertSrc = R"(
+        #version 460 core
+        layout(location = 0) in vec2 aPos;
+        layout(location = 1) in vec3 aColor;
+        out vec3 vColor;
+        void main() {
+            gl_Position = vec4(aPos, 0.0, 1.0);
+            gl_PointSize = 1.0;
+            vColor = aColor;
+        }
+    )";
+
+    const char* fragSrc = R"(
+        #version 460 core
+        in vec3 vColor;
+        out vec4 FragColor;
+        void main() {
+            FragColor = vec4(vColor, 1.0);
+        }
+    )";
+
+    GLuint vert = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vert, 1, &vertSrc, NULL);
+    glCompileShader(vert);
+
+    GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(frag, 1, &fragSrc, NULL);
+    glCompileShader(frag);
+
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vert);
+    glAttachShader(program, frag);
+    glLinkProgram(program);
+
+    glDeleteShader(vert);
+    glDeleteShader(frag);
+    return program;
+}
+
+//writes data from CUDA to vbo but also handles camera and screen pos math
+__global__ void writeToVBO(body* bodies, float* vbo, float cosX, float sinX, float cosY, float sinY, float camDist, float scale, float cx, float cy, float halfW, float halfH) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x; //global idx + bounds check
+    if (idx >= N) return;
+    Vec3 pos = bodies[idx].pos; //Pulling pos to local var to save global memory reads
+
+    //roation about the x-axis
+    float y1 = pos.y * cosX - pos.z * sinX;
+    float z1 = pos.y * sinX + pos.z * cosX;
+
+    //rotation abt y-axis
+    float x2 = pos.x * cosY + z1 * sinY;
+    float z2 = -pos.x * sinY + z1 * cosY;
+
+    float perspective = camDist/(camDist+z2); //Similar triangle side ratio used to project the body along its ray towards the camera onto z=0
+
+    float screenPX = cx + x2 * scale * perspective; //x2 is in AU, scale converts it to px, then perpspective applies the depth. This is all relative to the center though, so we add cx, the center pixel
+    float screenPY = cy + y1 * scale * perspective; //same logic
+
+    int vboIdx = idx*5; //5 floats per body, px, py, r,g,b, Note - this is refering to the first term in the 5 floats, the px
+
+    vbo[vboIdx] = (screenPX / halfW) - 1.0f; //OpenGl doesnt take in pixels, instead running from -1 (left edge) to 1 (right edge), so we divide the pixel by half the screen width, getting it on a scale from 0 to 2, and subtract 1 to make it range from -1, 1
+    vbo[vboIdx + 1] =  1.0f - (screenPY / halfH); //adding one makes this refer to the second term, py. Also for px, y increases from down to up but its up to down in openGL, so we invert it, otherwise same logic
+
+    if (idx == 0) { //setting the black hole to yellow
+        vbo[vboIdx + 2] = 1.0f;
+        vbo[vboIdx + 3] = 0.78f;
+        vbo[vboIdx + 4] = 0.2f;
+    } else {
+        vbo[vboIdx + 2] = 1.0f; //everything else to white
+        vbo[vboIdx + 3] = 1.0f;
+        vbo[vboIdx + 4] = 1.0f;
+    }
+
+}
+
 int main() {
     //generate N random bodies
     std::vector<body> bodies = initRandBodies(N);
@@ -371,83 +450,102 @@ int main() {
 
     //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
 
-    sf::RenderWindow window(sf::VideoMode({2560, 1440}), "nbody sim");
-    window.setFramerateLimit(60);
+    
+    //Creating window and loading OpenGL Functions
+    glfwInit(); //starts library
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4); //Setting version to 4.6 for GLFW
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6); 
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE); //Selects Core profile
+    GLFWwindow* window = glfwCreateWindow(3840, 2160, "nbody sim", NULL, NULL); //creating the window, the first NULL is for passing a monitor and the second NULL is for sharing openGl over mutliple windows
+    glfwMakeContextCurrent(window); //sets the drawing window
+    gladLoadGLLoader((GLADloadproc)glfwGetProcAddress); //loads gl__ functions from GPU driver so they can be used normally in code
+    glEnable(GL_PROGRAM_POINT_SIZE); //allows changing point sizes to more than 1px
 
-    //inits for benchmarking
+    //VAO and VBO setup
+    GLuint vao, vbo; //creates unsigned ints that will refer to the vertex array object and vertex buffer object
+    glGenVertexArrays(1, &vao); //creating vao and setting Gluint vao equal to its id, 1 is just the number of vaos we want, we would use an array if we wanted multiple rather than an int
+    glBindVertexArray(vao); //makes the vao active, meaning configurations are now recorded in this vao
+
+    glGenBuffers(1, &vbo); //same thing but for vbo
+    glBindBuffer(GL_ARRAY_BUFFER, vbo); //makes the buffer active, the GL_ARRAY_BUFFER just tells OpenGL that the buffer is holding vertex data
+    glBufferData(GL_ARRAY_BUFFER, N*5*sizeof(float), nullptr, GL_DYNAMIC_DRAW); //we reserve GPU memory for a buffer of vertex data that has 5 floats per body, is filled with null atm, and GL_DYNAMIC_DRAW tells the GPU driver the buffer will be frequently updated so it places it in a more optimal location. The 5*float size is the stride, how much to jump for the next vector
+
+    //configuring how OpenGL interprets the floats in the buffer, this is for position
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)0); //configuring location 0, read 2 floats from the vbo starting at byte 0, and GL_FALSE means dont normalize values, or dont turn rgb vals into floats
+    glEnableVertexAttribArray(0);
+
+    //Now setting color
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)(2*sizeof(float))); //same thing but the first byte is set 2 floats worth (8bytes) to the right
+    glEnableVertexAttribArray(1);
+
+    //compiling shader program
+    GLuint shaderProgram = compileShaderProgram(); //compiles vertex and fragment shader, linking them, and stores program id
+
+    //Link vbo with CUDA so kernels can write to it
+    cudaGraphicsResource* cudaVBO; //pointer so CUDA can track buffer
+    cudaGraphicsGLRegisterBuffer(&cudaVBO, vbo, cudaGraphicsMapFlagsWriteDiscard); //Allows CUDA to write into vbo, flag "cudaGraphics..." means everything will be overwritten per write
+
+    //camera constants
+    float camDist = 9.0f; //camera's distance away from origin along the z-axis
+    float tiltX = 0.6f, tiltY = 0.25f; //xy axis tilts so view isnt flat
+    float cosX = cos(tiltX), sinX = sin(tiltX), cosY = cos(tiltY), sinY = sin(tiltY);
+
+    //benchmarking inits
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0);
     cudaEventCreate(&t1);
-    int frameCount = 0;
+    int frameCount=0;
     float frameTimes[10];
 
-    while (window.isOpen()) {
-        //Checking for x button clicked
-        while (const std::optional event = window.pollEvent()) {
-            if (event->is<sf::Event::Closed>()) {   
-                window.close();
+    while (!glfwWindowShouldClose(window)) { //like SFML, keep going if no close event occurs
+        glfwPollEvents(); //keep processing OS queues
+
+            cudaEventRecord(t0); //record starting time
+
+            leapfrog(d_bodies, bodies, d_nodes, nodes, nodeCount, numBlocks, threadsPerBlock); //increment pos and vel
+            
+            cudaEventRecord(t1);
+            cudaEventSynchronize(t1); //stops CPU until GPU actually finishes the action
+            float ms;
+            cudaEventElapsedTime(&ms, t0, t1);
+
+            if (frameCount >= 10 && frameCount < 20) {
+                frameTimes[frameCount-10] = ms;
             }
-        }
-        cudaEventRecord(t0); //record starting time
-
-        leapfrog(d_bodies, bodies, d_nodes, nodes, nodeCount, numBlocks, threadsPerBlock); //kick 1, calc accel, the kick 2, basically update the positions for the frame
-
-        cudaEventRecord(t1); //record ending time
-        cudaEventSynchronize(t1);
-        float ms;
-        cudaEventElapsedTime(&ms, t0, t1); //saves elapsed time to ms
-
-        if (frameCount >= 10 && frameCount < 20) {
-            frameTimes[frameCount - 10] = ms;
-        }
-
-        if (frameCount == 20) {
-            float total = 0;
-            for (int i = 0; i < 10; i++) {
-                total += frameTimes[i];
+            if (frameCount == 20) {
+                float total = 0;
+                for (int i=0; i<10; i++) total += frameTimes[i];
+                printf("Average: %.2f ms/frame\n", total / 10.0f);
             }
-            printf("Average: %.2f ms/frame\n", total / 10.0f);
+            frameCount++;
+
+            float* d_vboPtr; //Will hold GPU memory address of the VBO
+            size_t bufferSize; //will recieve the size of the buffer in bytes, size_t is a unsigned integer type specifically for byte counts, and its used because CUDA uses it
+            cudaGraphicsMapResources(1, &cudaVBO, 0); //Gives CUDA control over buffer, remember cudaVBO is the OpenGL type ptr to the buffer, the 0 basically means wait for all openGL actions to complete before executing this
+            //Note - The above function is just internal semantics, telling whether CUDA or OpenGL is about to read and write, it does not move or change any data
+            cudaGraphicsResourceGetMappedPointer((void**)&d_vboPtr, &bufferSize, cudaVBO); //writes the ptr for the buffer into d_vboPtr and the size into bufferSize, passing a ptr by reference because we want to change where the ptr is pointing to, not the value the variable
+
+            writeToVBO<<<numBlocks, threadsPerBlock>>>(d_bodies, d_vboPtr, cosX, sinX, cosY, sinY, camDist, Scale, centerPx, centerPy, 1920.0f, 1080.0f); //actually write the position data into the buffer
+
+            cudaGraphicsUnmapResources(1, &cudaVBO, 0); //Giving control back to OpenGL for rendering, also making sure writeToVBO is fully completed before OpenGL can read the buffer, thats why cudaDeviceSync is not needed here
+
+            //Drawing
+            glClear(GL_COLOR_BUFFER_BIT); //clear buffer
+            glUseProgram(shaderProgram); //activates compiler vertex and fragment shaders
+            glBindVertexArray(vao); //restores all configurations so OpenGL can read the buffer correctly
+            glDrawArrays(GL_POINTS, 0, N); //run rendering pipeline from 0 through N-1 verticies from VAO. For each vertex in vao, 5 floats from VBO are read, shaders are run, and pxs are written to back buffer.
+            glfwSwapBuffers(window); //switches back buffer to visible one.
+
         }
 
-        frameCount++;
 
-        //cudaDeviceSynchronize(); Not needed as memcpy is blocking has it built in //finish updating bodies positions before copying back to CPU
-        cudaMemcpy(bodies.data(), d_bodies, N * sizeof(body), cudaMemcpyDeviceToHost); //copy data back to CPU for drawing (cpu bottleneck), fix with OpenGL vbo later
-        window.clear(); //clear the old frame
-        
-        sf::VertexArray points(sf::PrimitiveType::Points, N); //VectorArray requires one draw call per frame rather than bodies draw calls per frame in previous logic
-
-        //Main Render Loop
-        float camDist = 9.0f;
-        float tiltX = .6f;
-        float tiltY = 0.25f;
-        float cosX = cos(tiltX), sinX = sin(tiltX);
-        float cosY = cos(tiltY), sinY = sin(tiltY);
-
-        for (int i = 0; i < N; i++) {
-            // rotate around X axis
-            float y1 = bodies[i].pos.y * cosX - bodies[i].pos.z * sinX;
-            float z1 = bodies[i].pos.y * sinX + bodies[i].pos.z * cosX;
-            // rotate around Y axis
-            float x2 = bodies[i].pos.x * cosY + z1 * sinY;
-            float z2 = -bodies[i].pos.x * sinY + z1 * cosY;
-
-            float perspective = camDist / (camDist + z2);
-            float px = centerPx + x2 * Scale * perspective;
-            float py = centerPy + y1 * Scale * perspective;
-            points[i].position = {px, py};
-
-            if (i == 0) {
-                points[i].color = sf::Color(255, 200, 50);
-            } else {
-                points[i].color = sf::Color(255, 255, 255);
-            }
-        }
-        window.draw(points);
-        window.display();
-    }
-
-    cudaFree(d_bodies);
+    cudaGraphicsUnregisterResource(cudaVBO); //breaks CUDA - OpenGL link
+    glDeleteBuffers(1, &vbo); //deletes the buffers
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(shaderProgram);
+    glfwDestroyWindow(window); //deletes the window and shuts off glfw
+    glfwTerminate();
+    cudaFree(d_bodies); //clear up GPU memory
     cudaFree(d_nodes);
     cudaEventDestroy(t0);
     cudaEventDestroy(t1);
