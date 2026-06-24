@@ -7,6 +7,8 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <cuda_gl_interop.h>
+#include <thrust/sort.h>
+#include <thrust/device_ptr.h>
 
 //10k - Done
 //Barnes-Hut - Done
@@ -104,6 +106,37 @@ octNode getRootNode(const std::vector<body>& bodies) {
     root.centerPos = Vec3((xMin + xMax)/2.0, (yMin + yMax)/2.0, (zMin + zMax)/2.0);
     
     return root;
+}
+
+__device__ unsigned int spreadBits(unsigned int v) {
+    unsigned int result = 0;
+    for (int i = 0; i < 10; i++) {
+        result |= ((v >> i) & 1u) << (i * 3);   // bit i goes to position i*3
+    }
+    return result;
+}
+
+__device__ unsigned int morton3D(unsigned int x, unsigned int y, unsigned int z) {
+    return (spreadBits(z) << 2) | (spreadBits(y) << 1) | spreadBits(x); //combine spread xyz values into morton coord
+}
+
+__global__ void mortonEncode(body* bodies, unsigned int* codes, int* bodyIndicies, Vec3 minCoord, float inversedRange) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+
+    Vec3 pos = bodies[idx].pos; //pull pos to register for one global mem read
+    
+    unsigned int x = (unsigned int)((pos.x - minCoord.x) * inversedRange * 1023.0f); //normalizes the position then scales it to a 10 bit range, then its truncated to an int
+    unsigned int y = (unsigned int)((pos.y - minCoord.y) * inversedRange * 1023.0f);
+    unsigned int z = (unsigned int)((pos.z - minCoord.z) * inversedRange * 1023.0f);
+    //note, this breaks if we have a stray body well outside the visible range, as the "cell sizes", the smallest difference the encoding can differentiate, varies by the bounding size. Will implement culling of stray bodies to counter.
+
+    x = min(x, 1023u); //float rounding can result in 1024 so we bind the value to 1023 (1024 would require 11 bits)
+    y = min(y, 1023u);
+    z = min(z, 1023u);
+
+    codes[idx] = morton3D(x, y, z);
+    bodyIndicies[idx] = idx;
 }
 
 int getOctant(const body& b, const octNode& node) {
