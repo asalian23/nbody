@@ -117,7 +117,7 @@ __device__ unsigned int spreadBits(unsigned int v) {
 }
 
 __device__ unsigned int morton3D(unsigned int x, unsigned int y, unsigned int z) {
-    return (spreadBits(z) << 2) | (spreadBits(y) << 1) | spreadBits(x); //combine spread xyz values into morton coord
+    return (spreadBits(z) << 2) | (spreadBits(y) << 1) | spreadBits(x); //combine spread xyz values into morton coord, | is just bitwise or while || is logical or
 }
 
 __global__ void mortonEncode(body* bodies, unsigned int* codes, int* bodyIndicies, Vec3 minCoord, float inversedRange) {
@@ -135,8 +135,8 @@ __global__ void mortonEncode(body* bodies, unsigned int* codes, int* bodyIndicie
     y = min(y, 1023u);
     z = min(z, 1023u);
 
-    codes[idx] = morton3D(x, y, z);
-    bodyIndicies[idx] = idx;
+    codes[idx] = morton3D(x, y, z); //takes the normalized values for xyz and interleaves the bits to form the morton code
+    bodyIndicies[idx] = idx; //Fills the array of bodyIndicies with its current idx value, this will be sorted the same way as the codes array so accessing the same element of both arrays will tell us which morton code corresponds to which body
 }
 
 int getOctant(const body& b, const octNode& node) {
@@ -338,17 +338,35 @@ __global__ void leapfrogPartTwo(body* bodies, int N) {
     bodies[idx].vel = bodies[idx].vel + bodies[idx].acc * 0.5 * dt; //Applies kick 2
 }
 
-void leapfrog(body* d_bodies, std::vector<body>& bodies, octNode* d_nodes, std::vector<octNode>& nodes, int& nodeCount, int numBlocks, int threadsPerBlock) {
+void leapfrog(body* d_bodies, std::vector<body>& bodies, octNode* d_nodes, std::vector<octNode>& nodes, int& nodeCount, int numBlocks, int threadsPerBlock, unsigned int* d_codes, int* d_bodyIndicies, Vec3 mortonMin, float inversedRange) {
     //Kick 1 + Drift and bring updated bodies back to cpu
         leapfrogPartOne<<<numBlocks, threadsPerBlock>>>(d_bodies, N);
         cudaDeviceSynchronize();
+        
+       /* 
         cudaMemcpy(bodies.data(), d_bodies, N*sizeof(body), cudaMemcpyDeviceToHost);
-
         //Now logic to recalculate acceleration
         fillTree(bodies, nodes, nodeCount); //nodeCount's value right now is the nodes used in the previous tree, we pass that so fillTree knows how many nodes to reset.
         computeCOM(nodes, 0); //Always need to set the coms and masses after building the tree
         cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(octNode), cudaMemcpyHostToDevice); //Here nodeCount represents the nodes used to build the current tree, so we only need to copy that amount of nodes over
         calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes); //now we actually run the function to calculate the new accelerations
+        */
+
+        mortonEncode<<<numBlocks, threadsPerBlock>>>(d_bodies, d_codes, d_bodyIndicies, mortonMin, inversedRange);
+
+        thrust::device_ptr<unsigned int> codesPtr(d_codes);
+        thrust::device_ptr<int> indicesPtr(d_bodyIndicies);
+        thrust::sort_by_key(codesPtr, codesPtr + N, indicesPtr);
+
+        unsigned int h_codes[20];
+        int h_idx[20];
+        cudaMemcpy(h_codes, d_codes, 20*sizeof(unsigned int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_idx, d_bodyIndicies, 20*sizeof(int), cudaMemcpyDeviceToHost);
+        for (int i = 0; i < 20; i++)
+        printf("%2d: code=%u body=%d pos=(%.2f,%.2f,%.2f)\n",
+            i, h_codes[i], h_idx[i],
+            bodies[h_idx[i]].pos.x, bodies[h_idx[i]].pos.y, bodies[h_idx[i]].pos.z);
+            fflush(stdout);
 
         //Kick 2
         leapfrogPartTwo<<<numBlocks, threadsPerBlock>>>(d_bodies, N);
@@ -466,9 +484,13 @@ int main() {
     int numBlocks = (N+threadsPerBlock-1)/threadsPerBlock;
     
     //Prep for main logic
-    //Bodies prep
+    //Bodies prep and Morton Code prep
     body* d_bodies;
-    cudaMalloc(&d_bodies, N * sizeof(body)); //Reserve VRAM for bodies and nodes
+    unsigned int* d_codes; //unsigned as the morton codes can never be negative, although no difference for 32 bits either way
+    int* d_bodyIndicies;
+    cudaMalloc(&d_bodies, N * sizeof(body)); //Reserve VRAM for bodies
+    cudaMalloc(&d_codes, N *sizeof(unsigned int)); //Reserves VRAM for morton codes
+    cudaMalloc(&d_bodyIndicies, N *sizeof(int)); //Reserves VRAM for idx array for bodyIdx that morton code corresponds to
     cudaMemcpy(d_bodies, bodies.data(), N*sizeof(body), cudaMemcpyHostToDevice); //Copies vector to GPU
 
     //Nodes Prep
@@ -480,9 +502,6 @@ int main() {
     cudaMalloc(&d_nodes, maxNodes * sizeof(octNode)); //allocates memory for maximum amt of nodes, meaning we can reuse it and save on malloc overhead
     cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(octNode), cudaMemcpyHostToDevice); //copies filled node tree to GPU
     calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes); //assign initial acceleration to bodies
-
-    //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
-
     
     //Creating window and loading OpenGL Functions
     glfwInit(); //starts library
@@ -529,13 +548,18 @@ int main() {
     cudaEventCreate(&t1);
     int frameCount=0;
     float frameTimes[10];
+    
+    //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
+    const float mortonRange = 20.0f; //covers all of the screen and a bit more
+    Vec3 mortonMin(-mortonRange, -mortonRange, -mortonRange);
+    float inversedRange = 1.0f/ (2* mortonRange);
 
     while (!glfwWindowShouldClose(window)) { //like SFML, keep going if no close event occurs
         glfwPollEvents(); //keep processing OS queues
 
             cudaEventRecord(t0); //record starting time
 
-            leapfrog(d_bodies, bodies, d_nodes, nodes, nodeCount, numBlocks, threadsPerBlock); //increment pos and vel
+            leapfrog(d_bodies, bodies, d_nodes, nodes, nodeCount, numBlocks, threadsPerBlock, d_codes, d_bodyIndicies, mortonMin, inversedRange); //increment pos and vel
             
             cudaEventRecord(t1);
             cudaEventSynchronize(t1); //stops CPU until GPU actually finishes the action
