@@ -7,8 +7,6 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <cuda_gl_interop.h>
-#include <thrust/sort.h>
-#include <thrust/device_ptr.h>
 
 //10k - Done
 //Barnes-Hut - Done
@@ -39,8 +37,8 @@ const int maxDepth = 21; //ensures we don't have a stack overflow in the gpu
 const int maxNodes = N*3; //worst case node usage, as its a sparse octree, each body can create a new node, then at worse each layer up contains half the nodes of the layer below, never exceed 2N, and then N was added for padding.
 const float maxRadius = 6.0f;
 const float Scale = 600.0f/maxRadius; //screen width some margins divided by the max radius
-float centerPx = 640.0f; //note that this should be adjusted by screen on the github
-float centerPy = 400.0f;
+float centerPx = 1280.0f; //note that this should be adjusted by screen on the github
+float centerPy = 800.0f;
 
 struct Vec3 {
     float x, y, z;
@@ -74,16 +72,7 @@ struct octNode {
     int children[8], bodyIdx;
 };
 
-struct buildTask {
-    int nodeIdx, start, end, depth;
-};
-
-__device__ int getOctant(unsigned int mCode, int depth) {
-    return ((mCode >> (27 - 3*depth)) & 0b111); //extracts 3 bits of morton code corresponding to the current depth, which is the octant of the node at the depth in binary
-}
-
-
-__device__ void resetNode(octNode& node) {
+void resetNode(octNode& node) {
     node.centerOfMass = Vec3();
     node.centerPos = Vec3();
     node.totalMass = 0;
@@ -92,56 +81,6 @@ __device__ void resetNode(octNode& node) {
     for (int i=0; i<8; i++) node.children[i] = -1;
 }
 
-__global__ void splitLevel(unsigned int* codes, body* bodies, int* bodyIndices, octNode* nodes, buildTask* currLvlSplitQueue, int currQueueCount, buildTask* nextLvlSplitQueue, int* nextQueueCount, int* nodeCount) {
-    int taskIdx = blockIdx.x * blockDim.x + threadIdx.x; //One thread executes one task (one split) in the current Queue
-    if (taskIdx >= currQueueCount) return; //bounds check against total number of tasks in the current queue
-
-    buildTask task = currLvlSplitQueue[taskIdx]; //Loads task to local memory
-    int start = task.start, end = task.end, nodeIdx = task.nodeIdx, depth = task.depth; //range and depth, values needed to execute split
-    octNode& parentNode = nodes[nodeIdx]; //loads the node being split
-    
-    //Note - start and end and indicies in the morton code array and the body indicies array, but not the nodes array
-    //End is also one past the last index, so the range is [start, end)
-    
-    //Leaf node check
-    if (end - start == 1 || depth >= 10 || codes[start] == codes[end-1]) { //if the range is 1, or if the depth is 10 or more, or if all the morton codes in the range are the same, then we have a leaf node
-        //Note - The range can never be <1, unless we are running with N=0, but that's not a valid case
-        //Same way, depth can never be >10, as 10 would already break it, just defenisve coding
-        parentNode.bodyIdx = bodyIndices[start]; //assigns the body index to the parent node
-        parentNode.totalMass = bodies[bodyIndices[start]].mass; //sets the mass of the leaf node to the one body
-        parentNode.centerOfMass = bodies[bodyIndices[start]].pos; //sets the com of the leaf node to the one body
-        return;
-    }
-
-    int i = start; //variable i is functioning as local start, representing the first idx where the octant changes
-    while (i < end) {
-        int octant = getOctant(codes[i], depth); //gets the octant of the first body in range
-
-        int runEnd = i; //init runEnd to start of run
-        while (runEnd < end && getOctant(codes[runEnd], depth) == octant) { runEnd++; } //sets runEnd to the first index where the octant changes
-
-        int childNodeIdx = atomicAdd(nodeCount, 1); //reserves the next avaliable nodeIdx for the child about to be created. This uses atomic add as multiple threads are trying to get slots in the nodes array at once to write into it.
-        //Note - nodeCount is a varialbe tracking the number of nodes used and the next avaliable nodeIdx, and its incremented by one as a node is added
-        parentNode.children[octant] = childNodeIdx; //sets the parent node's child pointer to the new child node
-
-        octNode& childNode = nodes[childNodeIdx]; //loads child node to local memory
-        resetNode(childNode); //inits childNode, also, this doesn't have <<<>>> as its a device function, not __global__, so doesn't need to be launched
-        childNode.size = parentNode.size * 0.5f; //child node is half the size of the parent node
-        float centerShift = parentNode.size * 0.25f; //center shifts by 1/4 parent size for child along each xyz with sign dependant on octant
-        childNode.centerPos.x = parentNode.centerPos.x + centerShift * ((octant & 1) ? 1 : -1); //extracts the relevant bit according to convention and checks if its positive or 0, then changes the sign of centerShift accordinggly
-        childNode.centerPos.y = parentNode.centerPos.y + centerShift * ((octant & 2) ? 1 : -1);
-        childNode.centerPos.z = parentNode.centerPos.z + centerShift * ((octant & 4) ? 1 : -1);
-
-        //Now the child node needs to be added to the nextLvlSplitQueue, so that it can be split in the next iteration of the loop
-        int nextQueueIdx = atomicAdd(nextQueueCount, 1); //reserves the next avaliable index in the nextLvlSplitQueue, atomic as multiple threads are trying to add constructed child nodes to this at a time
-        nextLvlSplitQueue[nextQueueIdx] = buildTask{childNodeIdx, i, runEnd, depth+1}; //adds the child node to the nextLvlSplitQueue with its range and depth
-        
-        i = runEnd; //sets i to the first index of the next octant run
-    }
-
-}
-
-/*
 octNode getRootNode(const std::vector<body>& bodies) {
     float xMin = bodies[0].pos.x;
     float xMax = bodies[0].pos.x;
@@ -166,45 +105,10 @@ octNode getRootNode(const std::vector<body>& bodies) {
     
     return root;
 }
-*/
 
-__device__ unsigned int spreadBits(unsigned int v) {
-    unsigned int result = 0;
-    for (int i = 0; i < 10; i++) {
-        result |= ((v >> i) & 1u) << (i * 3);   // bit i goes to position i*3
-    }
-    return result;
-}
-
-//Note - morton3D sets the convention, the bits are ordered in zyx, 4s being z, 2s being y, and 1s being x
-__device__ unsigned int morton3D(unsigned int x, unsigned int y, unsigned int z) {
-    return (spreadBits(z) << 2) | (spreadBits(y) << 1) | spreadBits(x); //combine spread xyz values into morton coord, | is just bitwise or while || is logical or
-}
-
-__global__ void mortonEncode(body* bodies, unsigned int* codes, int* bodyIndicies, Vec3 minCoord, float inversedRange) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    Vec3 pos = bodies[idx].pos; //pull pos to register for one global mem read
-    
-    unsigned int x = (unsigned int)((pos.x - minCoord.x) * inversedRange * 1023.0f); //normalizes the position then scales it to a 10 bit range, then its truncated to an int
-    unsigned int y = (unsigned int)((pos.y - minCoord.y) * inversedRange * 1023.0f);
-    unsigned int z = (unsigned int)((pos.z - minCoord.z) * inversedRange * 1023.0f);
-    //note, this breaks if we have a stray body well outside the visible range, as the "cell sizes", the smallest difference the encoding can differentiate, varies by the bounding size. Will implement culling of stray bodies to counter.
-
-    x = min(x, 1023u); //float rounding can result in 1024 so we bind the value to 1023 (1024 would require 11 bits)
-    y = min(y, 1023u);
-    z = min(z, 1023u);
-
-    codes[idx] = morton3D(x, y, z); //takes the normalized values for xyz and interleaves the bits to form the morton code
-    bodyIndicies[idx] = idx; //Fills the array of bodyIndicies with its current idx value, this will be sorted the same way as the codes array so accessing the same element of both arrays will tell us which morton code corresponds to which body
-}
-
-/*
 int getOctant(const body& b, const octNode& node) {
     return (b.pos.x >= node.centerPos.x) | ((b.pos.y >= node.centerPos.y) << 1) | ((b.pos.z >= node.centerPos.z) << 2); //using bitwise to avoid branching
 }
-*/
 
 void calcChildCenterPos (const octNode& parent, const int& octant, Vec3& childCenterPos) {
     int xBit = octant & 1; //extract bits, the & operator only keeps the int n bits from the left
@@ -218,7 +122,6 @@ void calcChildCenterPos (const octNode& parent, const int& octant, Vec3& childCe
     childCenterPos.z = parent.centerPos.z + (2 * zBit - 1) * shift;
 }
 
-/*
 //The next function also builds the tree. Note - This is a sparse tree, so watch out for nonexistent nodes when recursing
 void insertBody(std::vector<body>& bodies, std::vector<octNode>& nodes, int& nodeCount, int bodyIdx, int nodeIdx, int currDepth) { //This function must be seperate as it recurses into itself
     const body& currBody = bodies[bodyIdx];
@@ -269,9 +172,7 @@ void insertBody(std::vector<body>& bodies, std::vector<octNode>& nodes, int& nod
     }
     insertBody(bodies, nodes, nodeCount, bodyIdx, currNode.children[octant], currDepth+1);
 }
-*/
 
-/*
 void fillTree(std::vector<body>& bodies, std::vector<octNode>& nodes, int& nodeCount) { //loops through bodies and inserts each one
     for (int i=0; i<nodeCount; i++) resetNode(nodes[i]); //resets the old nodes
 
@@ -282,9 +183,7 @@ void fillTree(std::vector<body>& bodies, std::vector<octNode>& nodes, int& nodeC
         insertBody(bodies, nodes, nodeCount, bodyIdx, 0, 0);
     }
 }
-*/
 
-/*
 void computeCOM(std::vector<octNode>& nodes, int nodeIdx) { //nodeIdx is just read not changed so we don't pass by reference
     octNode& currNode = nodes[nodeIdx];
 
@@ -316,41 +215,6 @@ void computeCOM(std::vector<octNode>& nodes, int nodeIdx) { //nodeIdx is just re
     currNode.totalMass = totalMass;
     currNode.centerOfMass = weightedMass * (1/totalMass);
     return;
-}
-*/
-
-void buildTreeGPU(unsigned int* d_codes, body* d_bodies, int* d_bodyIndicies, octNode* d_nodes, buildTask* d_currQueue, buildTask* d_nextQueue, int* d_nextQueueCount, int* d_nodeCount, int threadsPerBlock, float mortonRange) {
-    octNode rootNode;
-    rootNode.centerPos = Vec3(0, 0, 0); //center of the root node is at the origin
-    rootNode.size = 2 * mortonRange;
-    rootNode.totalMass = 0; //will be set up com pass
-    rootNode.centerOfMass = Vec3(0, 0, 0); //will be set up com pass
-    rootNode.bodyIdx = -1; //root node is not a leaf node
-    for (int i=0; i<8; i++) rootNode.children[i] = -1; //root node has no children yet
-    cudaMemcpy(d_nodes, &rootNode, sizeof(octNode), cudaMemcpyHostToDevice); //copy root node to device
-
-
-
-    int h_nodeCount = 1; //start with root node
-    cudaMemcpy(d_nodeCount, &h_nodeCount, sizeof(int), cudaMemcpyHostToDevice); //reset d_nodeCount to 1, otherwise it would keep growing and overflow the maxNode limit
-
-    buildTask rootTask = {0, 0, N, 0}; //root node task, nodeIdx=0, start=0, end=N, depth=0
-    cudaMemcpy(d_currQueue, &rootTask, sizeof(buildTask), cudaMemcpyHostToDevice); //copy root task to device
-    int currCount = 1; //One task (root) in the current queue
-
-    while (currCount > 0) {
-        int zero = 0; //need this as we can't directly set the value of d_nextQueueCount as its on the GPU
-        cudaMemcpy(d_nextQueueCount, &zero, sizeof(int), cudaMemcpyHostToDevice); //reset next queue count to 0
-        
-        int blocksNeeded = (currCount + threadsPerBlock - 1) / threadsPerBlock;
-        splitLevel<<<blocksNeeded, threadsPerBlock>>>(d_codes, d_bodies, d_bodyIndicies, d_nodes, d_currQueue, currCount, d_nextQueue, d_nextQueueCount, d_nodeCount);
-        cudaMemcpy(&currCount, d_nextQueueCount, sizeof(int), cudaMemcpyDeviceToHost); //update currCount with the number of tasks in the next queue, swapping that value
-
-        //Swap queus for next level
-        buildTask* temp = d_currQueue;
-        d_currQueue = d_nextQueue;
-        d_nextQueue = temp;
-    }
 }
 
 __global__ void calcAccel(body* bodies, octNode* nodes) {
@@ -441,27 +305,17 @@ __global__ void leapfrogPartTwo(body* bodies, int N) {
     bodies[idx].vel = bodies[idx].vel + bodies[idx].acc * 0.5 * dt; //Applies kick 2
 }
 
-void leapfrog(body* d_bodies, octNode* d_nodes, int* d_nodeCount, buildTask* d_currQueue, buildTask* d_nextQueue, int* d_nextQueueCount, int numBlocks, int threadsPerBlock, unsigned int* d_codes, int* d_bodyIndicies, Vec3 mortonMin, float inversedRange, float mortonRange) {
+void leapfrog(body* d_bodies, std::vector<body>& bodies, octNode* d_nodes, std::vector<octNode>& nodes, int& nodeCount, int numBlocks, int threadsPerBlock) {
     //Kick 1 + Drift and bring updated bodies back to cpu
         leapfrogPartOne<<<numBlocks, threadsPerBlock>>>(d_bodies, N);
-        
-       /* 
+        cudaDeviceSynchronize();
         cudaMemcpy(bodies.data(), d_bodies, N*sizeof(body), cudaMemcpyDeviceToHost);
+
         //Now logic to recalculate acceleration
         fillTree(bodies, nodes, nodeCount); //nodeCount's value right now is the nodes used in the previous tree, we pass that so fillTree knows how many nodes to reset.
         computeCOM(nodes, 0); //Always need to set the coms and masses after building the tree
         cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(octNode), cudaMemcpyHostToDevice); //Here nodeCount represents the nodes used to build the current tree, so we only need to copy that amount of nodes over
         calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes); //now we actually run the function to calculate the new accelerations
-        */
-
-        //Create the morton codes for the bodies and the body indicies array and sort them both together according to the codes
-        mortonEncode<<<numBlocks, threadsPerBlock>>>(d_bodies, d_codes, d_bodyIndicies, mortonMin, inversedRange); 
-        thrust::device_ptr<unsigned int> codesPtr(d_codes);
-        thrust::device_ptr<int> indicesPtr(d_bodyIndicies);
-        thrust::sort_by_key(codesPtr, codesPtr + N, indicesPtr);
-        
-        buildTreeGPU(d_codes, d_bodies, d_bodyIndicies, d_nodes, d_currQueue, d_nextQueue, d_nextQueueCount, d_nodeCount, threadsPerBlock, mortonRange); //builds the tree on the GPU
-        calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes);
 
         //Kick 2
         leapfrogPartTwo<<<numBlocks, threadsPerBlock>>>(d_bodies, N);
@@ -573,65 +427,36 @@ int main() {
     //generate N random bodies
     std::vector<body> bodies = initRandBodies(N);
     //Init nodes vector
-    //std::vector<octNode> nodes(maxNodes); No longer needed as all on GPU
+    std::vector<octNode> nodes(maxNodes);
     //GPU prep
     int threadsPerBlock = 256;
     int numBlocks = (N+threadsPerBlock-1)/threadsPerBlock;
+    
     //Prep for main logic
-    //Bodies prep and Morton Code prep
+    //Bodies prep
     body* d_bodies;
-    unsigned int* d_codes; //unsigned as the morton codes can never be negative, although no difference for 32 bits either way
-    int* d_bodyIndicies; //Body indicies array that will be sorted in the same way as the morton codes, so the morton code and index 1 has a its corresponding bodyIdx defined in this array's index 1
-    buildTask* d_currTaskQueue; //Ptr to the current task queue, or queue of the current splits that need to occur
-    buildTask* d_nextTaskQueue; //Ptr to the next task queue, or queue of the splits that need to occur at the next depth level
-    int* d_nextQueueCount; //Ptr to the nextQueueCount variable, which tracks the number of tasks in the nextTaskQueue
-    int* d_nodeCount; //Ptr to the nodeCount variable, which is used to track the next avaliable nodeIdx and the number of nodes used
-
-    cudaMalloc(&d_bodies, N * sizeof(body)); //Reserve VRAM for bodies
-    cudaMalloc(&d_codes, N *sizeof(unsigned int)); //Reserves VRAM for morton codes
-    cudaMalloc(&d_bodyIndicies, N *sizeof(int)); //Reserves VRAM for idx array for bodyIdx that morton code corresponds to
-    
-    //Both these queues are allocated size N as the maximum number of tasks that can be queued is N, one for each body
-    cudaMalloc(&d_currTaskQueue, N * sizeof(buildTask)); //Reserves VRAM for current task queue
-    cudaMalloc(&d_nextTaskQueue, N * sizeof(buildTask)); //Reserves VRAM for next task queue
-    
-    cudaMalloc(&d_nextQueueCount, sizeof(int)); //Reserves VRAM for one int, the next queue count
-    cudaMalloc(&d_nodeCount, sizeof(int)); //Reserves VRAM for one int, the node count
-
+    cudaMalloc(&d_bodies, N * sizeof(body)); //Reserve VRAM for bodies and nodes
     cudaMemcpy(d_bodies, bodies.data(), N*sizeof(body), cudaMemcpyHostToDevice); //Copies vector to GPU
 
     //Nodes Prep
     octNode* d_nodes;
-    //int nodeCount = 0; Not needed on GPU
-    //fillTree(bodies, nodes, nodeCount); //Fills the node tree with bodies
-    //computeCOM(nodes, 0); //sets the COMs for the nodes
+    int nodeCount = 0; //We create nodeCount outside fillTree so we only allocate space for the neccesary amount of nodes rather than the max each time. Its also set to 0 so the resetNodes loop works without error in the first treebuild.
+    fillTree(bodies, nodes, nodeCount); //Fills the node tree with bodies
+    computeCOM(nodes, 0); //sets the COMs for the nodes
     
     cudaMalloc(&d_nodes, maxNodes * sizeof(octNode)); //allocates memory for maximum amt of nodes, meaning we can reuse it and save on malloc overhead
-    //cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(octNode), cudaMemcpyHostToDevice); //On GPU no longer needed
-
-    //morton code prep
-    const float mortonRange = 20.0f; //covers all of the screen and a bit more
-    Vec3 mortonMin(-mortonRange, -mortonRange, -mortonRange);
-    float inversedRange = 1.0f/ (2* mortonRange);
-
-    //Initial tree build and initial acceleration calculation (needs morton codes init first)
-    mortonEncode<<<numBlocks, threadsPerBlock>>>(d_bodies, d_codes, d_bodyIndicies, mortonMin, inversedRange);
-    thrust::device_ptr<unsigned int> codesPtr(d_codes);
-    thrust::device_ptr<int> indicesPtr(d_bodyIndicies);
-    thrust::sort_by_key(codesPtr, codesPtr + N, indicesPtr);
-    buildTreeGPU(d_codes, d_bodies, d_bodyIndicies, d_nodes, d_currTaskQueue, d_nextTaskQueue, d_nextQueueCount, d_nodeCount, threadsPerBlock, mortonRange); //Initial tree build
-    int h_nc;
-    cudaMemcpy(&h_nc, d_nodeCount, sizeof(int), cudaMemcpyDeviceToHost);
-    printf("node count: %d\n", h_nc);
-    
+    cudaMemcpy(d_nodes, nodes.data(), nodeCount * sizeof(octNode), cudaMemcpyHostToDevice); //copies filled node tree to GPU
     calcAccel<<<numBlocks, threadsPerBlock>>>(d_bodies, d_nodes); //assign initial acceleration to bodies
+
+    //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
+
     
     //Creating window and loading OpenGL Functions
     glfwInit(); //starts library
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4); //Setting version to 4.6 for GLFW
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6); 
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE); //Selects Core profile
-    GLFWwindow* window = glfwCreateWindow(1280, 800, "nbody sim", NULL, NULL); //creating the window, the first NULL is for passing a monitor and the second NULL is for sharing openGl over mutliple windows
+    GLFWwindow* window = glfwCreateWindow(2560, 1600, "nbody sim", NULL, NULL); //creating the window, the first NULL is for passing a monitor and the second NULL is for sharing openGl over mutliple windows
     glfwMakeContextCurrent(window); //sets the drawing window
     gladLoadGLLoader((GLADloadproc)glfwGetProcAddress); //loads gl__ functions from GPU driver so they can be used normally in code
     glEnable(GL_PROGRAM_POINT_SIZE); //allows changing point sizes to more than 1px
@@ -671,15 +496,13 @@ int main() {
     cudaEventCreate(&t1);
     int frameCount=0;
     float frameTimes[10];
-    
-    //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
 
     while (!glfwWindowShouldClose(window)) { //like SFML, keep going if no close event occurs
         glfwPollEvents(); //keep processing OS queues
 
             cudaEventRecord(t0); //record starting time
 
-            leapfrog(d_bodies, d_nodes, d_nodeCount, d_currTaskQueue, d_nextTaskQueue, d_nextQueueCount, numBlocks, threadsPerBlock, d_codes, d_bodyIndicies, mortonMin, inversedRange, mortonRange); //increment pos and vel, and updates acceleration
+            leapfrog(d_bodies, bodies, d_nodes, nodes, nodeCount, numBlocks, threadsPerBlock); //increment pos and vel
             
             cudaEventRecord(t1);
             cudaEventSynchronize(t1); //stops CPU until GPU actually finishes the action
@@ -702,7 +525,7 @@ int main() {
             //Note - The above function is just internal semantics, telling whether CUDA or OpenGL is about to read and write, it does not move or change any data
             cudaGraphicsResourceGetMappedPointer((void**)&d_vboPtr, &bufferSize, cudaVBO); //writes the ptr for the buffer into d_vboPtr and the size into bufferSize, passing a ptr by reference because we want to change where the ptr is pointing to, not the value the variable
 
-            writeToVBO<<<numBlocks, threadsPerBlock>>>(d_bodies, d_vboPtr, cosX, sinX, cosY, sinY, camDist, Scale, centerPx, centerPy, 640.0f, 400.0f); //actually write the position data into the buffer
+            writeToVBO<<<numBlocks, threadsPerBlock>>>(d_bodies, d_vboPtr, cosX, sinX, cosY, sinY, camDist, Scale, centerPx, centerPy, centerPx, centerPy); //actually write the position data into the buffer
 
             cudaGraphicsUnmapResources(1, &cudaVBO, 0); //Giving control back to OpenGL for rendering, also making sure writeToVBO is fully completed before OpenGL can read the buffer, thats why cudaDeviceSync is not needed here
 
