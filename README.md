@@ -7,12 +7,12 @@
 <br />
 <div align="center">
 
-![N-Body Simulation](images/sim.gif)
+![N-Body Simulation](images/sim1.gif)
 
 <h3 align="center">CUDA N-Body Simulation</h3>
 
   <p align="center">
-    A GPU-programmed gravitational N-body simulation displaying 1M bodies in real time, featuring both brute force O(N²) and Barnes-Hut O(N log N) algorithms.
+    A GPU-programmed gravitational N-body simulation, featuring the Barnes-Hut O(N log N) algorithm with GPU and CPU tree building versions (OpenGL), and a brute force O(N²) algorithm (SFML).
     <br />
     <br />
     <a href="https://github.com/asalian23/nbody">View Demo</a>
@@ -54,14 +54,15 @@
 ## About The Project
 
 
-A gravitational N-body simulation written in C++ and CUDA, rendered with SFML. I've approached the problem with two different solutions:
+A gravitational N-body simulation written in C++ and CUDA. I have three main iterations of the simulation:
 
-- **Brute Force (O(N²))** — Every body computes and aggregates its acceleration towards every other body using shared memory tiling for efficient GPU utilization.
-- **Barnes-Hut (O(N log N))** — A quadtree is built on the CPU each frame to approximate sufficiently distant or small body groups as point masses, with the tree traversal and acceleration aggregation running on the GPU.
+- **Brute Force (O(N²))** — Every body computes and aggregates its acceleration towards every other body using shared memory tiling for efficient GPU utilization. Rendered with SFML.
+- **Barnes-Hut, CPU-built tree (O(N log N))** — An octree is built on the CPU each frame to approximate sufficiently distant or small body groups as point masses, with the tree traversal and acceleration aggregation running on the GPU. Rendered in 3D via CUDA-OpenGL interop.
+- **Barnes-Hut, GPU-built tree (O(N log N))** — The same octree approximation, but the tree is built entirely on the GPU each frame from Morton-coded (Z-order) body positions, removing the CPU as a per-frame bottleneck. Also rendered in 3D via CUDA-OpenGL interop.
 
-Both versions use leapfrog integration calculating position and velocity, Plummer softening to prevent force explosions and NaN poisoning, and astronomical units (AU, solar masses, seconds) to keep values within a float's range.
+All versions use leapfrog integration calculating position and velocity, Plummer softening to prevent force explosions and NaN poisoning, and astronomical units (AU, solar masses, seconds) to keep values within a float's range.
 
-I built this project to understand GPU programming, hardware limitations, and their quirks. Key topics included CUDA memory types such as shared, global, registers, constant, float limitations and numerical stability as NaN poisoning issues were resolved, the practical tradeoffs between brute force and Barnes-Hut algorithms, and stack-based tree traversal through flat arrays simulating trees.
+I built this project to understand GPU programming, hardware limitations, and data structures. Key topics included CUDA memory types such as shared, global, registers, constant, float limitations and numerical stability as NaN poisoning issues were resolved, the practical tradeoffs between brute force and Barnes-Hut algorithms, and stack-based tree traversal through flat arrays simulating trees.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -71,7 +72,9 @@ I built this project to understand GPU programming, hardware limitations, and th
 
 * [![CUDA][CUDA-badge]][CUDA-url]
 * [![C++][CPP-badge]][CPP-url]
-* [![SFML][SFML-badge]][SFML-url]
+* [![OpenGL][OpenGL-badge]][OpenGL-url]
+* [![GLFW][GLFW-badge]][GLFW-url]
+* [![glad][glad-badge]][glad-url]
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -82,11 +85,17 @@ I built this project to understand GPU programming, hardware limitations, and th
 ### Prerequisites
 
 - An NVIDIA GPU with CUDA support (tested on RTX 4090)
-- [CUDA Toolkit 13.2](https://developer.nvidia.com/cuda-toolkit)
-- [SFML 3.0.2](https://www.sfml-dev.org/)
+- [CUDA Toolkit 13.3](https://developer.nvidia.com/cuda-toolkit)
 - A C++ compiler with C++17 support
+- Thrust — bundled with the CUDA Toolkit, used by the GPU-tree build for `thrust::sort_by_key` (no separate install needed)
+
+OpenGL Requires:
+- [GLFW 3.4](https://www.glfw.org/) for window/context creation
+- [glad](https://glad.dav1d.de/) generated for **OpenGL 4.6, Core Profile** — this must match the context requested in code (`GLFW_CONTEXT_VERSION_MAJOR/MINOR = 4.6`, `GLFW_OPENGL_CORE_PROFILE`, and the `#version 460 core` GLSL shaders)
 
 ### Installation
+
+> **NOTE (you fill in):** fill in real include/lib paths for GLFW and glad below, and confirm the link flags (`-lopengl32` on Windows vs `-lGL -ldl` on Linux). Also confirm the actual output filenames/source filenames for the CPU-tree vs GPU-tree Barnes-Hut builds — right now both would compile from something like `nbody.cu`, so you likely want to distinguish them (e.g. separate files, or a `#define`/build flag).
 
 1. Clone the repo
    ```sh
@@ -97,17 +106,20 @@ I built this project to understand GPU programming, hardware limitations, and th
 ```sh
    cd nBody
 ```
-   Barnes-Hut version:
+   Barnes-Hut — GPU-built tree version:
 ```sh
-   nvcc nbody.cu -o dnbody.exe -std=c++17 -diag-suppress 1394 -diag-suppress 1388 -I "C:\SFML\SFML-3.0.2\include" -L "C:\SFML\SFML-3.0.2\lib" -lsfml-graphics -lsfml-window -lsfml-system
+   nvcc nbodyGPUTreeVersion.cu C:\glad\src\glad.c -o nbodyGPUTreeVersion.exe -std=c++17 -diag-suppress 1394 -diag-suppress 1388 -I "C:\glad\include" -I "C:\GLFW\glfw-3.4.bin.WIN64\include" -L "C:\GLFW\glfw-3.4.bin.WIN64\lib-vc2022" -Xcompiler "/MD /Zc:preprocessor" -lglfw3 -lopengl32 -lgdi32 -luser32 -lshell32
+```
+   Barnes-Hut — CPU-built tree version:
+```sh
+   nvcc nbodyCPUTreeVersion.cu C:\glad\src\glad.c -o nbodyCPUTreeVersion.exe -std=c++17 -arch=sm_120 -diag-suppress 1394 -diag-suppress 1388 -I "C:\glad\include" -I "C:\GLFW\glfw-3.4.bin.WIN64\include" -L "C:\GLFW\glfw-3.4.bin.WIN64\lib-vc2022" -Xcompiler "/MD /Zc:preprocessor" -lglfw3 -lopengl32 -lgdi32 -luser32 -lshell32
 ```
    Brute force version:
 ```sh
-   nvcc bruteforce.cu -o bf.exe -std=c++17 -diag-suppress 1394 -diag-suppress 1388 -I "C:\SFML\SFML-3.0.2\include" -L "C:\SFML\SFML-3.0.2\lib" -lsfml-graphics -lsfml-window -lsfml-system
+   nvcc bruteforce.cu glad.c -o bruteforceVersion.exe -std=c++17 -diag-suppress 1394 -diag-suppress 1388 -I "path\to\glfw\include" -I "path\to\glad\include" -L "path\to\glfw\lib" -lglfw3 -lopengl32
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
 
 
 ## How It Works
@@ -133,19 +145,33 @@ Rather than SI units, astronomical units are used to keep values within the rang
 | Time | Seconds | Unchanged from SI |
 | G | 3.964 × 10⁻¹⁴ AU³/(M☉·s²) | Derived from SI G |
 
-### Barnes-Hut Algorithm
+### Barnes-Hut Algorithm — CPU-Built Tree
 
-1. **Tree Build (CPU)** — A new sparse quadtree is created each frame, dividing until each body is contained in leaves.
-2. **Center of Mass Pass (CPU)** — A bottom-up traversal computes the total mass and center of mass for each internal node by aggregating its children.
-3. **Force Calculation (GPU)** — Each thread walks the tree with a stack. If a node's `size / distance ≤ θ` (default 0.5), the node is treated as a single body. If it does not satisfy the theta criterion, we recurse into its children.
+1. **Tree Build (CPU)** — A root node is sized to bound the whole body set (min/max scan across all positions, padded slightly to avoid edge cases). Bodies are inserted one at a time: if a node is empty, the body is placed directly and the node becomes a leaf. If the node is already a leaf holding a body, it's converted into an internal node — the existing body is re-inserted into the correct child octant, then the new body follows the same path. A depth cap prevents infinite recursion when bodies are nearly coincident.
+2. **Center of Mass Pass (CPU)** — A bottom-up recursive traversal. Leaf and empty nodes already have a correct mass/COM from insertion. For internal nodes, the traversal recurses into each of the 8 children first, then aggregates total mass and mass-weighted center of mass from whichever children exist.
+3. **Force Calculation (GPU)** — Identical to the GPU-tree version: each thread walks the tree iteratively with a fixed-size stack, applying the same `size / distance ≤ θ` criterion. Only the used portion of the CPU-built node array is copied to the GPU each frame.
+
+### Barnes-Hut Algorithm — GPU-Built Tree
+
+1. **Morton Encoding (GPU)** — Each body's 3D position is normalized against a fixed bounding range and quantized to 10 bits per axis, then the bits are interleaved into a single 30-bit Morton (Z-order) code, giving every body a sortable key that reflects spatial locality.
+2. **Spatial Sort (GPU)** — `thrust::sort_by_key` sorts a body-index array by Morton code, so spatially nearby bodies land contiguously in memory.
+3. **Level-by-Level Tree Build (GPU)** — Starting from a single root task covering the full sorted range, the `splitLevel` kernel processes a queue of build tasks in parallel. Each task partitions its `[start, end)` range into up to 8 child octants by comparing 3-bit groups of the Morton code at the current depth, atomically pushes new child tasks onto a queue for the next level, and terminates a branch once a range holds one body, all bodies in range share a code, or a depth cap (10) is hit. Levels are processed one at a time until the task queue empties.
+4. **Center of Mass Pass (GPU, bottom-up)** — The `calcCOMByLvl` kernel processes the tree one level at a time, from the deepest level back up to the root, aggregating each node's mass and center of mass from its children (or directly from its bodies, for leaves holding multiple co-located bodies).
+5. **Force Calculation (GPU)** — Same traversal as the CPU-tree version: each thread walks the tree with a fixed-size stack, applying the `size / distance ≤ θ` criterion to decide whether to approximate a node as a point mass or descend into its children.
+
+### Rendering — CUDA-OpenGL Interop (Barnes-Hut, both variants)
+
+Both Barnes-Hut variants render through the same CUDA-OpenGL interop path. An OpenGL VBO is registered with CUDA via `cudaGraphicsGLRegisterBuffer` and mapped each frame with `cudaGraphicsMapResources`, giving a CUDA kernel (`writeToVBO`) a direct device pointer into the buffer. That kernel takes each body's simulation-space position, applies a 3D camera rotation (adjustable X/Y tilt) and a perspective projection, and writes the resulting screen-space coordinates plus a color straight into the VBO — no CPU round-trip. Once unmapped, a minimal GLSL shader pair (`#version 460 core`) draws every body as a point in a single `glDrawArrays` call, with the central mass rendered in a distinct color from the rest. Brute force does **not** use this path — it still renders through SFML.
 
 ### GPU Optimizations
 
-- **Stack Tree Traversal** — GPU threads are inefficient with recursion so instead the kernel traverses the tree iteratively utilizing a stack array to identify what nodes need to be visited.
-- **float32 implementation** — Switched all doubles to floats. On the RTX 4090, float throughput is 64× higher than double throughput. Required conversion from SI to astronomical units.
-- **`rsqrtf` intrinsic** — Replaces separate `sqrt` and divides with a single-cycle instruction, computing softened forces.
-- **Shared memory tiling** (only in brute force) — Bodies are loaded into shared memory in tiles of 256, reducing global memory bandwidth.
-- **Minimal data transfer** — Only the required number of tree nodes are copied to the GPU each frame.
+- **Stack Tree Traversal** (both Barnes-Hut variants) — GPU threads are inefficient with recursion, so the force kernel traverses the tree iteratively using a fixed-size stack array to track which nodes still need visiting.
+- **float32 implementation** (all variants) — Switched all doubles to floats. On the RTX 4090, float throughput is 64× higher than double throughput. Required conversion from SI to astronomical units to keep values within float range.
+- **`rsqrtf` intrinsic** (all variants) — Replaces separate `sqrt` and divide with a single-cycle instruction when computing softened forces.
+- **Shared memory tiling** (brute force only) — Bodies are loaded into shared memory in tiles of 256, so a block's worth of threads reuses one shared-memory load per tile instead of each thread hitting global memory independently. 256 was chosen as 8 full warps (avoids wasted lanes), while keeping the shared-memory footprint per block (~40 bytes/body × 256 = 10 KB) small enough that multiple blocks stay resident per SM.
+- **Morton-code spatial sort + GPU tree construction** (GPU-tree variant only) — Replaces per-frame CPU tree building with a fully parallel, level-by-level GPU build, removing the CPU as a bottleneck and keeping the whole physics step device-resident.
+- **Minimal data transfer** (CPU-tree variant) — Only the number of nodes actually used by that frame's tree (not the full preallocated buffer) is copied from host to device each frame.
+- **CUDA-OpenGL Interop** (both Barnes-Hut variants) — Body positions are projected and written straight into the render VBO by a CUDA kernel, eliminating the CPU memcpy that would otherwise sit between the physics step and rendering.
 
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -179,7 +205,7 @@ markdown
 Barnes-Hut outpaces brute force at about 350K bodies. The experimental crossover point is higher than the theoretical due to the overhead added from CPU-side tree building and memory transfers.
 
 
-![Benchmark Chart](images/benchmark.png)
+![Benchmark Chart](images/benchmark_linear.png)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -228,5 +254,11 @@ Project Link: [https://github.com/asalian23/nbody](https://github.com/asalian23/
 [CUDA-url]: https://developer.nvidia.com/cuda-toolkit
 [CPP-badge]: https://img.shields.io/badge/C++-00599C?style=for-the-badge&logo=cplusplus&logoColor=white
 [CPP-url]: https://isocpp.org/
+[OpenGL-badge]: https://img.shields.io/badge/OpenGL-5586A4?style=for-the-badge&logo=opengl&logoColor=white
+[OpenGL-url]: https://www.opengl.org/
+[GLFW-badge]: https://img.shields.io/badge/GLFW-black?style=for-the-badge
+[GLFW-url]: https://www.glfw.org/
+[glad-badge]: https://img.shields.io/badge/glad-white?style=for-the-badge
+[glad-url]: https://glad.dav1d.de/
 [SFML-badge]: https://img.shields.io/badge/SFML-8CC445?style=for-the-badge&logo=sfml&logoColor=white
 [SFML-url]: https://www.sfml-dev.org/

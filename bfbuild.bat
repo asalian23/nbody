@@ -1,1 +1,1 @@
-nvcc bruteforce.cu -o bf.exe -std=c++17 -diag-suppress 1394 -diag-suppress 1388 -I "C:\SFML\SFML-3.0.2\include" -L "C:\SFML\SFML-3.0.2\lib" -lsfml-graphics -lsfml-window -lsfml-system
+nvcc bruteforce.cu C:\glad\src\glad.c -o bf.exe -std=c++17 -diag-suppress 1394 -diag-suppress 1388 -I "C:\glad\include" -I "C:\GLFW\glfw-3.4.bin.WIN64\include" -L "C:\GLFW\glfw-3.4.bin.WIN64\lib-vc2022" -Xcompiler "/MD /Zc:preprocessor" -lglfw3 -lopengl32 -lgdi32 -luser32 -lshell32

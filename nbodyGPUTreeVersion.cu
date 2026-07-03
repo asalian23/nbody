@@ -39,8 +39,8 @@ __constant__ float theta_device = 0.5f;
 const int maxNodes = N*3; //worst case node usage, as its a sparse octree, each body can create a new node, then at worse each layer up contains half the nodes of the layer below, never exceed 2N, and then N was added for padding.
 const float maxRadius = 6.0f;
 const float Scale = 600.0f/maxRadius; //screen width some margins divided by the max radius
-float centerPx = 640.0f; //note that this should be adjusted by screen on the github
-float centerPy = 400.0f;
+float centerPx = 1280.0f; //note that this should be adjusted by screen on the github
+float centerPy = 800.0f;
 
 struct Vec3 {
     float x, y, z;
@@ -726,7 +726,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4); //Setting version to 4.6 for GLFW
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6); 
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE); //Selects Core profile
-    GLFWwindow* window = glfwCreateWindow(1280, 800, "nbody sim", NULL, NULL); //creating the window, the first NULL is for passing a monitor and the second NULL is for sharing openGl over mutliple windows
+    GLFWwindow* window = glfwCreateWindow(2560, 1600, "nbody sim", NULL, NULL); //creating the window, the first NULL is for passing a monitor and the second NULL is for sharing openGl over mutliple windows
     glfwMakeContextCurrent(window); //sets the drawing window
     gladLoadGLLoader((GLADloadproc)glfwGetProcAddress); //loads gl__ functions from GPU driver so they can be used normally in code
     glEnable(GL_PROGRAM_POINT_SIZE); //allows changing point sizes to more than 1px
@@ -765,7 +765,7 @@ int main() {
     cudaEventCreate(&t0);
     cudaEventCreate(&t1);
     int frameCount=0;
-    float frameTimes[10];
+    float frameTimes[100];
     
     //we dont need cudaDeviceSynchronize() here as the leapfrog CPU function is only made of kernels
 
@@ -781,13 +781,13 @@ int main() {
             float ms;
             cudaEventElapsedTime(&ms, t0, t1);
 
-            if (frameCount >= 10 && frameCount < 20) {
-                frameTimes[frameCount-10] = ms;
+            if (frameCount >= 20 && frameCount < 120) {
+                frameTimes[frameCount-20] = ms;
             }
-            if (frameCount == 20) {
+            if (frameCount == 120) {
                 float total = 0;
-                for (int i=0; i<10; i++) total += frameTimes[i];
-                printf("Average: %.2f ms/frame\n", total / 10.0f);
+                for (int i=0; i<100; i++) total += frameTimes[i];
+                printf("Average: %.2f ms/frame\n", total / 100.0f);
             }
             frameCount++;
 
@@ -797,7 +797,7 @@ int main() {
             //Note - The above function is just internal semantics, telling whether CUDA or OpenGL is about to read and write, it does not move or change any data
             cudaGraphicsResourceGetMappedPointer((void**)&d_vboPtr, &bufferSize, cudaVBO); //writes the ptr for the buffer into d_vboPtr and the size into bufferSize, passing a ptr by reference because we want to change where the ptr is pointing to, not the value the variable
 
-            writeToVBO<<<numBlocks, threadsPerBlock>>>(d_bodies, d_vboPtr, cosX, sinX, cosY, sinY, camDist, Scale, centerPx, centerPy, 640.0f, 400.0f); //actually write the position data into the buffer
+            writeToVBO<<<numBlocks, threadsPerBlock>>>(d_bodies, d_vboPtr, cosX, sinX, cosY, sinY, camDist, Scale, centerPx, centerPy, centerPx, centerPy); //actually write the position data into the buffer, //its center px x and px y because its the same as half the width and height
 
             cudaGraphicsUnmapResources(1, &cudaVBO, 0); //Giving control back to OpenGL for rendering, also making sure writeToVBO is fully completed before OpenGL can read the buffer, thats why cudaDeviceSync is not needed here
 
