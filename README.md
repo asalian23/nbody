@@ -95,8 +95,6 @@ OpenGL Requires:
 
 ### Installation
 
-> **NOTE (you fill in):** fill in real include/lib paths for GLFW and glad below, and confirm the link flags (`-lopengl32` on Windows vs `-lGL -ldl` on Linux). Also confirm the actual output filenames/source filenames for the CPU-tree vs GPU-tree Barnes-Hut builds — right now both would compile from something like `nbody.cu`, so you likely want to distinguish them (e.g. separate files, or a `#define`/build flag).
-
 1. Clone the repo
    ```sh
    git clone https://github.com/asalian23/nbody.git
