@@ -8,4 +8,8 @@
 *.lib
 *.dll
 cd.txt
-NbodyWorkRetypes.cpp
+NbodyWorkRetypes.cpp"*.exp" 
+"*.obj" 
+"*.exe" 
+"*.pdb" 
+".vscode/" 

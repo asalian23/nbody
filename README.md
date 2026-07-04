@@ -178,52 +178,21 @@ Both Barnes-Hut variants render through the same CUDA-OpenGL interop path. An Op
 
 ## Benchmarks
 
-Tested on an RTX 4090. Each measurement is the average of 10 frames after a 10-frame warmup.
+Tested on an RTX 4090. Each measurement is the average of 100 frames after a 20-frame warmup.
 
-markdown
-| N (bodies) | Barnes-Hut (ms/frame) | Brute Force (ms/frame) | Speedup |
-|------------|----------------------|----------------------|---------|
-| 1,000 | 0.73 | 0.18 | 0.25× |
-| 10,000 | 3.17 | 0.91 | 0.29× |
-| 25,000 | 7.01 | 2.06 | 0.29× |
-| 50,000 | 14.05 | 4.41 | 0.31× |
-| 75,000 | 22.89 | 9.14 | 0.40× |
-| 100,000 | 31.62 | 15.45 | 0.49× |
-| 200,000 | 75.23 | 54.61 | 0.73× |
-| 300,000 | 120.03 | 115.87 | 0.97× |
-| 350,000 | 150.49 | 151.81 | 1.01× |
-| 400,000 | 177.24 | 201.96 | 1.14× |
-| 500,000 | 226.91 | 303.34 | 1.34× |
-| 600,000 | 287.03 | 438.60 | 1.53× |
-| 700,000 | 359.29 | 585.75 | 1.63× |
-| 800,000 | 425.24 | 743.26 | 1.75× |
-| 900,000 | 496.75 | 963.94 | 1.94× |
-| 1,000,000 | 563.02 | 1,184.79 | 2.10× |
+| N (bodies) | Brute Force (ms/frame) | Barnes-Hut, CPU-built tree (ms/frame) | Barnes-Hut, GPU-built tree (ms/frame) | GPU-tree vs. BF | GPU-tree vs. CPU-tree |
+|------------|------------------------|----------------------------------------|----------------------------------------|------------------|------------------------|
+| 1,000 | 0.07 | 0.89 | 3.00 | 0.02× | 0.30× |
+| 10,000 | 0.90 | 3.61 | 4.91 | 0.18× | 0.74× |
+| 50,000 | 5.82 | 16.07 | 13.11 | 0.44× | 1.23× |
+| 100,000 | 16.99 | 35.75 | 24.70 | 0.69× | 1.45× |
+| 250,000 | 79.59 | 113.79 | 58.65 | 1.36× | 1.94× |
+| 500,000 | 317.60 | 254.87 | 122.44 | 2.59× | 2.08× |
+| 1,000,000 | 1,178.90 | 535.64 | 258.42 | 4.56× | 2.07× |
 
-Barnes-Hut outpaces brute force at about 350K bodies. The experimental crossover point is higher than the theoretical due to the overhead added from CPU-side tree building and memory transfers.
-
+"GPU-tree vs. X" is X's time divided by GPU-tree's time — values above 1× mean GPU-tree was faster. Brute force wins at small N (its O(N²) cost is trivially cheap and it has no tree overhead), but both Barnes-Hut variants overtake it as N grows. GPU-tree pulls ahead of CPU-tree by around 50K bodies and keeps widening its lead through 1M, since the fully GPU-resident tree build avoids the host round-trip that scales worse with N. GPU-tree overtakes brute force between 100K and 250K bodies, and by 1M is running about 4.6× faster than brute force and roughly 2× faster than the CPU-built tree.
 
 ![Benchmark Chart](images/benchmark_linear.png)
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
-
-## Roadmap
-
-- [x] CPU N-body physics engine (Vec3, leapfrog, pairwise forces)
-- [x] CUDA brute force O(N²) kernel with shared memory tiling
-- [x] Real-time SFML visualization (sf::VertexArray single draw call)
-- [x] GPU benchmarks — O(N²) scaling verified, occupancy cliff identified
-- [x] Barnes-Hut sparse quadtree — CPU tree build, GPU force traversal
-- [x] Float32 support with astronomical unit system
-- [x] Barnes-Hut benchmarks and crossover analysis
-- [ ] 3D simulation with OpenGL rendering
-- [ ] CUDA-OpenGL interoperability (eliminate CPU memcpy bottleneck)
-- [ ] Yoshida 4th-order symplectic integrator
-- [ ] Full GPU tree construction (Burtscher & Pingali approach)
-- [ ] Galaxy collision scenario
-
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
