@@ -192,7 +192,7 @@ Tested on an RTX 4090. Each measurement is the average of 100 frames after a 20-
 
 "GPU-tree vs. X" is X's time divided by GPU-tree's time — values above 1× mean GPU-tree was faster. Brute force wins at small N (its O(N²) cost is trivially cheap and it has no tree overhead), but both Barnes-Hut variants overtake it as N grows. GPU-tree pulls ahead of CPU-tree by around 50K bodies and keeps widening its lead through 1M, since the fully GPU-resident tree build avoids the host round-trip that scales worse with N. GPU-tree overtakes brute force between 100K and 250K bodies, and by 1M is running about 4.6× faster than brute force and roughly 2× faster than the CPU-built tree.
 
-![Benchmark Chart](images/benchmark_linear.png)
+![Benchmark Chart](images/benchmarks_fitCurve.png)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
